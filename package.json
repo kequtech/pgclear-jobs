@@ -44,7 +44,8 @@
     "prepack": "npm run build"
   },
   "dependencies": {
-    "@kequtech/pgclear": "^0.3.3"
+    "@kequtech/pgclear": "^0.3.3",
+    "cron-parser": "^5.10.3"
   },
   "peerDependencies": {
     "@kequtech/tenon-orm": "^0.4.5"

@@ -2,23 +2,30 @@ export interface ExecutionPolicy {
   readonly maxAttempts: number;
   readonly retryDelayMs: number;
   readonly retryBackoff: 'fixed' | 'exponential';
+  readonly retryMaxDelayMs: number;
+  readonly retryJitter: boolean;
   readonly executionTimeoutMs: number;
 }
 
 export interface HandlerContext {
   readonly id: string;
   readonly attempt: number;
+  readonly maxAttempts: number;
   /** Cooperative cancellation on timeout, lost ownership, or shutdown expiry. */
   readonly signal: AbortSignal;
+  readonly scheduledFor: Date | null;
 }
 
 export interface JobDefinition<Payload> extends ExecutionPolicy {
   readonly name: string;
+  /** Per-runner limit for this definition, within the runner's overall limit. */
+  readonly concurrency?: number;
   handler(payload: Payload, context: HandlerContext): void | Promise<void>;
 }
 
 export interface JobOptions<Payload> extends Partial<ExecutionPolicy> {
   readonly name: string;
+  readonly concurrency?: number;
   handler(payload: Payload, context: HandlerContext): void | Promise<void>;
 }
 
@@ -34,18 +41,32 @@ export function defineJob<Payload>(options: JobOptions<Payload>): JobDefinition<
     throw new TypeError('Job name must contain 1–200 characters and cannot be blank.');
   }
   if (typeof options.handler !== 'function') throw new TypeError('A job handler is required.');
+  if (typeof (options.retryJitter ?? false) !== 'boolean')
+    throw new TypeError('retryJitter must be boolean.');
+  return Object.freeze({
+    name: options.name,
+    handler: options.handler,
+    ...executionPolicy(options),
+    ...(options.concurrency === undefined
+      ? {}
+      : { concurrency: integer(options.concurrency, 'concurrency', 1, 1000) }),
+  });
+}
+
+/** Select only persisted execution policy; also supplies defaults for older records. */
+export function executionPolicy(options: Partial<ExecutionPolicy>): ExecutionPolicy {
   const retryBackoff = options.retryBackoff ?? 'exponential';
   if (retryBackoff !== 'fixed' && retryBackoff !== 'exponential') {
     throw new TypeError('retryBackoff must be fixed or exponential.');
   }
-  return Object.freeze({
-    name: options.name,
-    handler: options.handler,
+  return {
     maxAttempts: integer(options.maxAttempts ?? 3, 'maxAttempts', 1, 1000),
     retryDelayMs: integer(options.retryDelayMs ?? 1000, 'retryDelayMs', 0, 86_400_000),
     retryBackoff,
+    retryMaxDelayMs: integer(options.retryMaxDelayMs ?? 86_400_000, 'retryMaxDelayMs', 0),
+    retryJitter: options.retryJitter ?? false,
     executionTimeoutMs: integer(options.executionTimeoutMs ?? 300_000, 'executionTimeoutMs'),
-  });
+  };
 }
 
 /** Reject lossy JSON conversion, including Dates, sparse arrays and undefined fields. */

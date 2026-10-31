@@ -7,8 +7,8 @@ planning record; this document resolves the contracts implemented so far.
 
 `installJobs(pool)` explicitly creates the shared `tenon_jobs` schema, migration history,
 job records and attempt history in one transaction. An advisory transaction lock serializes
-installers. The current schema is version 2; installation upgrades version 1 by adding notification
-triggers while preserving records. Newer versions are rejected. Runners require the current schema:
+installers. The current schema is version 3. Upgrades preserve existing records; version 2 added
+notification triggers and version 3 adds schedules and job occurrence metadata. Newer versions are rejected. Runners require the current schema:
 run `installJobs` explicitly before starting them. Producers and runners never install or upgrade
 storage themselves. Do not manually create objects in this reserved schema.
 
@@ -23,17 +23,22 @@ created and closed by the runner through pgclear's existing listener API.
 
 `defineJob({ name, handler, ...policy })` returns an immutable definition without database work.
 Names contain 1–200 characters and cannot be blank. A handler receives `(payload, context)`;
-context contains `id`, one-based `attempt`, and a cooperative `AbortSignal`.
+context contains `id`, one-based `attempt`, the persisted `maxAttempts`, a cooperative `AbortSignal`,
+and `scheduledFor` (a Date for a recurring occurrence, otherwise `null`). An optional definition
+`concurrency` limits unfinished handlers of that name in each runner, within its overall limit.
 
 | Policy               | Default       | Contract                                                     |
 | -------------------- | ------------- | ------------------------------------------------------------ |
 | `maxAttempts`        | 3             | Total attempts, including the first; 1–1000                  |
 | `retryDelayMs`       | 1000          | Base delay, 0–86400000 ms                                    |
-| `retryBackoff`       | `exponential` | `fixed` or base × 2^(attempt−1), capped at one day           |
+| `retryBackoff`       | `exponential` | `fixed` or base × 2^(attempt−1)                              |
+| `retryMaxDelayMs`    | 86400000      | Maximum policy delay, 0–2147483647 ms                        |
+| `retryJitter`        | false         | Randomly choose between half and all of the capped delay     |
 | `executionTimeoutMs` | 300000        | Maximum duration of each attempt, positive 32-bit integer ms |
 
 Submission snapshots policy into the record. Changing a definition affects new submissions;
-existing work keeps its policy, but executes the handler deployed under its name. Applications
+existing work keeps its policy, but executes the handler deployed under its name. Older records
+without the new cap/jitter fields retain the original one-day cap and no jitter. Applications
 must maintain payload compatibility or use a new definition name. TypeScript types do not perform
 runtime schema validation on stored data. Handlers should validate untrusted payloads.
 
@@ -42,19 +47,31 @@ nonfinite numbers, bigint, cycles, Dates and other class instances are rejected 
 PostgreSQL's normal JSONB limits also apply. Data must survive a JSON round trip; no driver-specific
 value types are stored in payloads. Timestamps in public records are JavaScript Dates.
 
+Automatic retries use the same policy for handler failures and expired claims. A thrown ordinary
+error follows that policy. `JobError(message, { retry: false })` fails immediately;
+`JobError(message, { retryAt: Date })` sets a minimum next execution time, taking the later of that
+instant and policy backoff. A past date cannot shorten backoff and a provider delay can exceed the
+policy cap. Neither option extends the total attempt budget. The error snapshots its supplied
+Date as an ISO string. Retry waits are persisted execution times, not sleeps inside handlers.
+
 ## Record operations
 
 `jobs(scope)` offers:
 
-| Method                                         | Result and eligibility                                           |
-| ---------------------------------------------- | ---------------------------------------------------------------- |
-| `send(definition, payload, { key?, runAt? }?)` | A typed job record; default execution time is the database clock |
-| `get(id)`                                      | A job with unknown payload, or `null`                            |
-| `find(definition, { key?, states?, limit? }?)` | Typed records, oldest creation first, then UUID                  |
-| `update(definition, id, payload)`              | Replace the payload of a pending job matching the definition     |
-| `reschedule(id, runAt)`                        | Set a pending job's earliest execution time                      |
-| `cancel(id)`                                   | Move a pending job to cancelled                                  |
-| `attempts(id, { limit? }?)`                    | Newest attempts first; absent IDs have empty history             |
+| Method                                                   | Result and eligibility                                           |
+| -------------------------------------------------------- | ---------------------------------------------------------------- |
+| `send(definition, payload, { key?, runAt?, delayMs? }?)` | A typed job record; default execution time is the database clock |
+| `get(id)`                                                | A job with unknown payload, or `null`                            |
+| `find(definition, { key?, states?, limit? }?)`           | Typed records, oldest creation first, then UUID                  |
+| `update(definition, id, payload)`                        | Replace the payload of a pending job matching the definition     |
+| `reschedule(id, runAt)`                                  | Set a pending job's earliest execution time                      |
+| `cancel(id)`                                             | Move a pending job to cancelled                                  |
+| `attempts(id, { limit? }?)`                              | Newest attempts first; absent IDs have empty history             |
+| `schedule(definition, payload, options)`                 | Register or update a durable recurring producer                  |
+| `schedules(definition, { limit? }?)`                     | Typed schedules, ordered by schedule key                         |
+| `unschedule(definition, key?)`                           | Remove that schedule; return whether it existed                  |
+
+`runAt` and `delayMs` are mutually exclusive. Relative delay is calculated using the database clock.
 
 Lists default to 100 and have a maximum of 1000. There is no pagination yet. A state filter of
 `[]` returns no rows; an omitted filter includes all states. Mutations enforce pending state in
@@ -91,7 +108,8 @@ Applications must keep credentials and sensitive data out of thrown messages.
 
 Heartbeats renew the lease up to the maximum execution deadline. A runner that loses ownership
 signals cancellation and stops recording outcomes. An unfinished handler continues occupying its
-local slot after cancellation, timeout or ownership loss, until it actually settles. A handler
+local slot after cancellation, timeout or ownership loss, until it actually settles. Per-definition
+concurrency holds those same slots; a saturated definition does not prevent other definitions from running. A handler
 ignoring cancellation can therefore stall its runner's slots; use process supervision when needed.
 The concurrency limit applies within one runner, including overrunning handlers, not across runners.
 
@@ -107,7 +125,7 @@ and keeps claiming while work is available, instead of maintaining a polling loo
 | `concurrency`        | 1                                                    | Unfinished local handlers, 1–1000; no distributed concurrency limit |
 | `notifications`      | Connection settings, or disabled for a borrowed pool | A URI/pgclear connection settings for the listener, or `false`      |
 | `pollIntervalMs`     | 30000 with notifications, otherwise 1000             | Fallback reconciliation interval                                    |
-| `recoveryIntervalMs` | 1000                                                 | One independent recovery batch per interval                         |
+| `recoveryIntervalMs` | 1000                                                 | Maintenance interval: one recovery batch and one schedule batch     |
 | `leaseMs`            | 30000                                                | Renew every third of this interval; minimum 30 ms                   |
 | `shutdownTimeoutMs`  | 30000                                                | Grace for active handlers after abort, then abandon                 |
 | `databaseTimeoutMs`  | 10000                                                | Bound each driver operation and listener startup                    |
@@ -140,6 +158,40 @@ between an empty claim and a separate scheduling query. Polling remains a backst
 notifications and locked work that becomes available without another notification. While every
 local slot is occupied, the dispatcher waits for handler settlement rather than repeatedly fetching.
 
+## Recurring schedules
+
+A schedule belongs to a definition name and a schedule key, distinct from an outstanding-work
+key on an individual job. The default schedule key is `''`. A schedule stores payload, execution
+policy, five-field cron expression, IANA time zone (default `UTC`), `nextRunAt`, `lastJobId`,
+`missed` policy (`once` by default), and `overlap` policy (`skip` by default). List operations
+default to 100 and permit at most 1000 rows.
+
+Registration upserts by name/key. Unchanged expression and zone preserve the cursor across restarts;
+changing either starts at the next future occurrence. Payload and policy updates apply to future
+submissions, leaving existing jobs unchanged. Registration computes the initial cursor against
+the database clock. `jobs(tx)` schedule writes and removals join the supplied application transaction.
+
+One maintenance pass handles at most 50 due schedules for its runner's selected definition names.
+It locks them with `FOR UPDATE SKIP LOCKED`, inserts ordinary jobs and advances cursors in one
+transaction. The unique schedule/occurrence index prevents duplicate records across terminal states.
+Job creation triggers the existing transactional notification. Empty schedule checks do not begin
+transactions. No runner means no recurring submissions; jobs resume when an appropriate runner starts.
+
+`missed: 'once'` submits one job for the saved due occurrence and moves directly to the next future
+occurrence, so catch-up is bounded without walking every missed tick. `context.scheduledFor` identifies
+that saved occurrence, which may be old after downtime. `missed: 'skip'` discards a cursor more than
+one minute late and resumes in the future. `overlap: 'skip'` suppresses a new submission while that
+schedule has a pending or running job, including pending retries. `overlap: 'allow'` permits another
+occurrence; claim fencing and at-least-once semantics still apply. `unschedule` removes only the
+producer, not jobs already submitted.
+
+Cron parsing uses `cron-parser`, with deterministic five-field expressions and no randomized `H`
+fields or RRULE support. `previewSchedule({ cron, timeZone? }, { from?, count? })` is pure computation,
+returns Dates strictly after `from`, defaults to five results and permits 1–100. Calendar/DST
+semantics follow the parser. Tests cover Budapest's spring missing local time shifting forward
+and a normal sequence choosing the first occurrence of the autumn repeated hour. The scheduler
+uses its saved forward-calculated occurrence, so reverse calendar lookup cannot change its identity.
+
 ## Shutdown and failures
 
 A job found during an in-flight claim at shutdown is left for lease recovery. Active attempts get
@@ -161,12 +213,12 @@ database errors or close a borrowed pool. Owned pools and listeners are disposed
 
 Terminal records and attempt history are retained indefinitely. Job records expose state, attempts,
 last failure, policy and lifecycle times. A worker registry, overdue-work statistics,
-cleanup, retry/removal APIs, schedules and permanent submission idempotency remain future work.
+cleanup, retry/removal APIs and permanent submission idempotency remain future work.
 
 This version has behavioral PostgreSQL tests, including a killed worker process, listener reconnection,
-transactional notification delivery and a preserving upgrade from schema version 1. Network partitions,
+transactional notification delivery, recurring schedule contention/rollback and preserving upgrades from schema version 1. Network partitions,
 uncertain commit responses, sustained load, mixed application versions and additional upgrade paths still
-need investigation before production use. Only the version 1 to version 2 upgrade has been validated.
+need investigation before production use. The implemented schema path is version 1 → 2 → 3.
 
 Mechanism references: [PostgreSQL locking clauses](https://www.postgresql.org/docs/18/sql-select.html#SQL-FOR-UPDATE-SHARE)
 and [pg-boss 12.38.0 plans](https://github.com/timgit/pg-boss/blob/12.38.0/src/plans.ts).

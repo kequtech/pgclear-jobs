@@ -3,12 +3,14 @@ import { setMaxListeners } from 'node:events';
 import { createPool, listen } from '@kequtech/pgclear';
 import type { ConnectionOptions, Listener, Pool, PoolOptions } from '@kequtech/pgclear';
 import { integer } from './definition.js';
+import { errorText, JobError } from './errors.js';
 import type { JobDefinition } from './definition.js';
-import { fetchJob, finishClaim, recoverClaims, renewClaim } from './claims.js';
+import { claimJob, finishClaim, recoverClaims, renewClaim } from './claims.js';
 import type { Claim } from './claims.js';
 import { checkSchema, notificationChannel } from './schema.js';
 import type { Execute } from './storage.js';
 import { settleOrAbort, Wakeup } from './wakeup.js';
+import { advanceSchedules } from './schedules.js';
 
 export interface RunnerOptions {
   readonly signal?: AbortSignal;
@@ -36,18 +38,6 @@ async function pause(ms: number, signal: AbortSignal): Promise<void> {
   }
 }
 
-function errorText(error: unknown): string {
-  // Store messages only, not stacks or payloads. Handlers must avoid secrets in messages.
-  try {
-    return (error instanceof Error ? `${error.name}: ${error.message}` : String(error)).slice(
-      0,
-      4000,
-    );
-  } catch {
-    return 'Handler threw an unprintable error';
-  }
-}
-
 async function executeClaim(
   execute: Execute,
   claim: Claim,
@@ -57,24 +47,20 @@ async function executeClaim(
 ): Promise<void> {
   const controller = new AbortController();
   const monitors = new AbortController();
-  const abandonAttempt = () => controller.abort(new Error('Runner shutdown deadline reached'));
-  abandon.addEventListener('abort', abandonAttempt, { once: true });
-  if (abandon.aborted) abandonAttempt();
-  const interrupted = Promise.withResolvers<void>();
-  const onAbort = () => interrupted.resolve();
-  controller.signal.addEventListener('abort', onAbort, { once: true });
-  if (controller.signal.aborted) onAbort();
+  const signal = AbortSignal.any([controller.signal, abandon]);
   const handler = Promise.resolve().then(async () => {
-    if (controller.signal.aborted) return;
+    if (signal.aborted) return;
     try {
       await definition.handler(claim.payload, {
         id: claim.id,
         attempt: claim.attempt_count,
-        signal: controller.signal,
+        signal,
+        maxAttempts: claim.policy.maxAttempts,
+        scheduledFor: claim.scheduled_for ? new Date(claim.scheduled_for) : null,
       });
       return null;
     } catch (error) {
-      return errorText(error);
+      return error instanceof JobError ? error : errorText(error);
     }
   });
   const heartbeat = async () => {
@@ -88,19 +74,19 @@ async function executeClaim(
     }
   };
   const beat = heartbeat();
-  const timeout = pause(claim.policy.executionTimeoutMs, monitors.signal).then(() => {
-    if (!monitors.signal.aborted) controller.abort(new Error('Job execution deadline reached'));
-  });
+  const timeout = setTimeout(
+    () => controller.abort(new Error('Job execution deadline reached')),
+    claim.policy.executionTimeoutMs,
+  );
   try {
-    const result = await Promise.race([handler, interrupted.promise, timeout, beat]);
-    if (!controller.signal.aborted && result !== undefined) {
+    const result = await Promise.race([settleOrAbort(handler, signal), beat]);
+    if (!signal.aborted && result !== undefined) {
       await finishClaim(execute, claim, result);
     }
   } finally {
     monitors.abort();
     controller.abort(new Error('Attempt finished'));
-    controller.signal.removeEventListener('abort', onAbort);
-    abandon.removeEventListener('abort', abandonAttempt);
+    clearTimeout(timeout);
     await beat;
   }
   // Cancellation ends claim ownership; the handler still occupies its local slot
@@ -158,6 +144,7 @@ export async function runJobs(
   setMaxListeners(concurrency + 1, abandon.signal);
   const wake = new Wakeup();
   const active = new Set<Promise<void>>();
+  const counts = new Map<string, number>();
   const failures: unknown[] = [];
   let connected = false;
   let shutdownTimer: ReturnType<typeof setTimeout> | undefined;
@@ -212,16 +199,22 @@ export async function runJobs(
     listening = startListener().catch(fail);
     maintenance = (async () => {
       while (!stop.signal.aborted) {
-        if (await recoverClaims(execute)) wake.notify();
+        const recovered = await recoverClaims(execute);
+        const scheduled = await advanceSchedules(pool, names, databaseMs);
+        if (recovered || scheduled) wake.notify();
         await pause(recoveryMs, stop.signal);
       }
     })().catch(fail);
     while (!stop.signal.aborted) {
       const version = wake.version;
-      if (active.size < concurrency) {
-        const { claim, delayMs } = await fetchJob(execute, names, leaseMs);
+      const available = names.filter(
+        (name) => (counts.get(name) ?? 0) < (byName.get(name)!.concurrency ?? concurrency),
+      );
+      if (active.size < concurrency && available.length) {
+        const { claim, delayMs } = await claimJob(execute, available, leaseMs);
         if (stop.signal.aborted) break;
         if (claim) {
+          counts.set(claim.name, (counts.get(claim.name) ?? 0) + 1);
           const task = executeClaim(
             execute,
             claim,
@@ -232,6 +225,7 @@ export async function runJobs(
             .catch(fail)
             .finally(() => {
               active.delete(task);
+              counts.set(claim.name, counts.get(claim.name)! - 1);
               wake.notify();
             });
           active.add(task);

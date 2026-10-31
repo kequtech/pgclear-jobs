@@ -19,6 +19,8 @@ test('invalid policies and lossy JSON payloads fail before database access', () 
   for (const options of [
     { maxAttempts: 0 },
     { retryDelayMs: -1 },
+    { retryMaxDelayMs: -1 },
+    { concurrency: 0 },
     { executionTimeoutMs: Infinity },
   ]) {
     assert.throws(() => defineJob({ name: 'example', handler() {}, ...options }), TypeError);

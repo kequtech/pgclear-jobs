@@ -26,6 +26,12 @@ async function types(tx: QueryClient) {
   // @ts-expect-error Typed updates use the definition's payload.
   await jobs(pool).update(a, job.id, { id: false });
   await tenonJobs(tx).send(a, { id: '1' });
+  const schedule = await jobs(pool).schedule(a, { id: '1' }, { cron: '* * * * *' });
+  const scheduledId: string = schedule.payload.id;
+  void scheduledId;
+  // @ts-expect-error Scheduling preserves the definition's payload contract.
+  await jobs(pool).schedule(a, { id: 1 }, { cron: '* * * * *' });
+  await tenonJobs(tx).schedule(a, { id: '1' }, { cron: '* * * * *' });
   await runJobs(pool, [a, b]);
   await runJobs('postgresql://localhost/example', [a, b]);
   await runJobs({ connectionString: 'postgresql://localhost/example', maxConnections: 2 }, [a]);

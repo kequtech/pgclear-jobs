@@ -1,14 +1,17 @@
 import { randomUUID } from 'node:crypto';
 import type { Executor, InputValue } from '@kequtech/pgclear';
-import { integer, serializePayload } from './definition.js';
+import { executionPolicy, integer, serializePayload } from './definition.js';
 import type { JobDefinition } from './definition.js';
 import { JobNotFoundError, JobStateError } from './errors.js';
 import { jobRecord, states } from './storage.js';
 import type { Execute, Job, JobState, StoredJob } from './storage.js';
+import { listSchedules, saveSchedule } from './schedules.js';
+import type { Schedule, ScheduleOptions } from './schedules.js';
 
 export interface SendOptions {
   readonly key?: string;
   readonly runAt?: Date;
+  readonly delayMs?: number;
 }
 
 export interface FindOptions {
@@ -35,6 +38,32 @@ function timestamp(date: Date): string {
 export class JobRecords {
   constructor(private readonly execute: Execute) {}
 
+  schedule<Payload>(
+    definition: JobDefinition<Payload>,
+    payload: NoInfer<Payload>,
+    options: ScheduleOptions,
+  ): Promise<Schedule<Payload>> {
+    return saveSchedule(this.execute, definition, payload, options);
+  }
+
+  schedules<Payload>(
+    definition: JobDefinition<Payload>,
+    options: { readonly limit?: number } = {},
+  ): Promise<readonly Schedule<Payload>[]> {
+    return listSchedules(this.execute, definition, options.limit ?? 100);
+  }
+
+  async unschedule(definition: JobDefinition<unknown>, key = ''): Promise<boolean> {
+    return (
+      (
+        await this.execute<{ id: string }>(
+          'DELETE FROM tenon_jobs.schedules WHERE name = $1 AND key = $2 RETURNING id',
+          [definition.name, key],
+        )
+      ).rows.length === 1
+    );
+  }
+
   async send<Payload>(
     definition: JobDefinition<Payload>,
     payload: NoInfer<Payload>,
@@ -46,10 +75,12 @@ export class JobRecords {
     ) {
       throw new TypeError('key must be a string of at most 500 characters.');
     }
-    const { maxAttempts, retryDelayMs, retryBackoff, executionTimeoutMs } = definition;
+    if (options.runAt !== undefined && options.delayMs !== undefined)
+      throw new TypeError('Use runAt or delayMs, not both.');
     const result = await this.execute<{ record: StoredJob }>(
       `INSERT INTO tenon_jobs.jobs AS j (id, name, payload, key, run_at, policy)
-       VALUES ($1, $2, $3::jsonb, $4, COALESCE($5::timestamptz, clock_timestamp()), $6::jsonb)
+       VALUES ($1, $2, $3::jsonb, $4, COALESCE($5::timestamptz,
+         clock_timestamp() + $7::double precision * interval '1 millisecond'), $6::jsonb)
        ON CONFLICT (name, key) WHERE key IS NOT NULL AND state IN ('pending', 'running')
        DO UPDATE SET key = j.key
        RETURNING to_jsonb(j) AS record`,
@@ -59,7 +90,8 @@ export class JobRecords {
         serializePayload(payload),
         options.key ?? null,
         options.runAt === undefined ? null : timestamp(options.runAt),
-        JSON.stringify({ maxAttempts, retryDelayMs, retryBackoff, executionTimeoutMs }),
+        JSON.stringify(executionPolicy(definition)),
+        integer(options.delayMs ?? 0, 'delayMs', 0),
       ],
     );
     return jobRecord<Payload>(result.rows[0]!.record);

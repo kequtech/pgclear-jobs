@@ -25,15 +25,18 @@ export class Wakeup {
 }
 
 /** Keep a handler's slot until it settles, or shutdown deliberately abandons it. */
-export async function settleOrAbort(work: Promise<unknown>, signal: AbortSignal): Promise<void> {
+export async function settleOrAbort<T>(
+  work: Promise<T>,
+  signal: AbortSignal,
+): Promise<T | undefined> {
   if (signal.aborted) return;
   let onAbort: () => void = () => {};
-  const aborted = new Promise<void>((resolve) => {
-    onAbort = resolve;
+  const aborted = new Promise<undefined>((resolve) => {
+    onAbort = () => resolve(undefined);
     signal.addEventListener('abort', onAbort, { once: true });
   });
   try {
-    await Promise.race([work, aborted]);
+    return await Promise.race([work, aborted]);
   } finally {
     signal.removeEventListener('abort', onAbort);
   }

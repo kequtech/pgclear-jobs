@@ -56,6 +56,19 @@ const migrations = [
       ON tenon_jobs.jobs FOR EACH ROW WHEN (NEW.state = 'pending')
       EXECUTE FUNCTION tenon_jobs.notify_pending()`,
   ],
+  [
+    `CREATE TABLE tenon_jobs.schedules (
+      id uuid PRIMARY KEY, name text NOT NULL, key text NOT NULL DEFAULT '', payload jsonb NOT NULL,
+      policy jsonb NOT NULL, cron text NOT NULL, time_zone text NOT NULL,
+      missed text NOT NULL CHECK (missed IN ('once', 'skip')),
+      overlap text NOT NULL CHECK (overlap IN ('skip', 'allow')),
+      next_run_at timestamptz NOT NULL, last_job_id uuid, UNIQUE (name, key)
+    )`,
+    'CREATE INDEX schedules_due ON tenon_jobs.schedules (name, next_run_at, id)',
+    'ALTER TABLE tenon_jobs.jobs ADD COLUMN schedule_id uuid, ADD COLUMN scheduled_for timestamptz',
+    'CREATE UNIQUE INDEX jobs_schedule_occurrence ON tenon_jobs.jobs (schedule_id, scheduled_for)',
+    "CREATE INDEX jobs_schedule_outstanding ON tenon_jobs.jobs (schedule_id) WHERE state IN ('pending', 'running')",
+  ],
 ] as const;
 
 /** Explicit, transactional installation and upgrades. Never called by record operations. */

@@ -3,62 +3,26 @@ import { randomUUID } from 'node:crypto';
 import { fork } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { once } from 'node:events';
-import test, { after, before } from 'node:test';
+import test from 'node:test';
 import { createPool, listen } from '@kequtech/pgclear';
 import { createTenon, unsafeSql } from '@kequtech/tenon-orm';
-import {
-  defineJob,
-  installJobs,
-  jobs,
-  JobNotFoundError,
-  JobStateError,
-  runJobs,
-} from '../../src/index.js';
+import { installJobs, jobs, JobNotFoundError, JobStateError, runJobs } from '../../src/index.js';
 import { jobs as tenonJobs } from '../../src/tenon.js';
-import { claimJob, finishClaim, recoverClaims, renewClaim } from '../../src/claims.js';
+import { claimJob as fetchJob, finishClaim, recoverClaims, renewClaim } from '../../src/claims.js';
 import type { Execute } from '../../src/storage.js';
 import { notificationChannel } from '../../src/schema.js';
 
-const url = process.env.TENON_JOBS_TEST_DATABASE_URL;
-if (!url || !new URL(url).pathname.endsWith('_test')) {
-  throw new Error('Set TENON_JOBS_TEST_DATABASE_URL to a dedicated database ending in _test.');
-}
-const pool = createPool({ connectionString: url, maxConnections: 12 });
-const execute: Execute = (text, values) => pool.queryClassic(text, values);
-const names: string[] = [];
-function definition(options: Partial<Parameters<typeof defineJob<number>>[0]> = {}) {
-  const name = `test-${randomUUID()}`;
-  names.push(name);
-  return defineJob({ name, retryDelayMs: 0, handler(_payload: number) {}, ...options });
-}
-async function until(check: () => Promise<boolean>, timeout = 5000) {
-  const deadline = Date.now() + timeout;
-  while (!(await check())) {
-    if (Date.now() > deadline) throw new Error('Timed out waiting for observable job state.');
-    await delay(10);
-  }
-}
+import { definition, execute, pool, until, url } from '../helpers/database.js';
 
-before(async () => {
-  await Promise.all([installJobs(pool), installJobs(pool)]);
-});
-after(async () => {
-  try {
-    await pool.queryClassic(
-      'DELETE FROM tenon_jobs.jobs WHERE name IN (SELECT jsonb_array_elements_text($1::jsonb))',
-      [JSON.stringify(names)],
-    );
-  } finally {
-    await pool.close();
-  }
-});
-
+async function claimJob(execute: Execute, names: readonly string[], leaseMs: number) {
+  return (await fetchJob(execute, names, leaseMs)).claim;
+}
 test('installation is repeatable and safe across concurrent installers', async () => {
   await Promise.all([installJobs(pool), installJobs(pool), installJobs(pool)]);
   const result = await pool.queryClassic<{ count: string }>(
     'SELECT count(*)::text AS count FROM tenon_jobs.migrations',
   );
-  assert.equal(result.rows[0]?.count, '2');
+  assert.equal(result.rows[0]?.count, '3');
 });
 
 test('pgclear scope insertion commits or rolls back with application data', async () => {
@@ -285,27 +249,43 @@ test('expired claims recover with a fresh token and reject stale outcomes and re
   );
 });
 
-test('heartbeats keep slow work owned without crossing its maximum deadline', async () => {
+test('heartbeats extend a live claim while its handler remains active', async () => {
+  const release = Promise.withResolvers<void>();
   let handled = 0;
   const def = definition({
-    executionTimeoutMs: 5000,
+    executionTimeoutMs: 10000,
     async handler() {
       handled++;
-      await delay(1200);
+      await release.promise;
     },
   });
   const row = await jobs(pool).send(def, 1);
   const stop = new AbortController();
   const running = runJobs(pool, [def], {
     signal: stop.signal,
-    leaseMs: 500,
-    pollIntervalMs: 5,
+    leaseMs: 3000,
+    pollIntervalMs: 10,
     concurrency: 2,
+    shutdownTimeoutMs: 20,
   });
+  async function leaseTime(): Promise<number> {
+    const result = await pool.queryClassic<{ lease: string | null }>(
+      'SELECT to_jsonb(lease_until) AS lease FROM tenon_jobs.jobs WHERE id = $1',
+      [row.id],
+    );
+    return result.rows[0]?.lease ? new Date(result.rows[0].lease).getTime() : 0;
+  }
   try {
+    await until(async () => handled === 1);
+    const initial = await leaseTime();
+    assert.ok(initial > 0);
+    await until(async () => (await leaseTime()) >= initial + 1500);
+    assert.equal((await jobs(pool).get(row.id))?.state, 'running');
+    release.resolve();
     await until(async () => (await jobs(pool).get(row.id))?.state === 'completed');
   } finally {
     stop.abort();
+    release.resolve();
     await running;
   }
   assert.equal(handled, 1);
@@ -456,15 +436,19 @@ test('upgrading version 1 preserves jobs and installs transactional notification
   await assert.rejects(
     pool.transaction(async (tx) => {
       const row = await jobs(tx).send(def, 7);
+      await tx.queryClassic('DROP TABLE tenon_jobs.schedules');
+      await tx.queryClassic(
+        'ALTER TABLE tenon_jobs.jobs DROP COLUMN schedule_id, DROP COLUMN scheduled_for',
+      );
       await tx.queryClassic('DROP TRIGGER notify_pending ON tenon_jobs.jobs');
       await tx.queryClassic('DROP FUNCTION tenon_jobs.notify_pending()');
-      await tx.queryClassic('DELETE FROM tenon_jobs.migrations WHERE version = 2');
+      await tx.queryClassic('DELETE FROM tenon_jobs.migrations WHERE version >= 2');
       await installJobs({ transaction: (work) => tx.savepoint(work) });
       assert.equal((await jobs(tx).get(row.id))?.payload, 7);
       const version = await tx.queryClassic<{ version: number }>(
         'SELECT max(version) AS version FROM tenon_jobs.migrations',
       );
-      assert.equal(version.rows[0]?.version, 2);
+      assert.equal(version.rows[0]?.version, 3);
       const trigger = await tx.queryClassic<{ enabled: string }>(
         "SELECT tgenabled AS enabled FROM pg_trigger WHERE tgrelid = 'tenon_jobs.jobs'::regclass AND tgname = 'notify_pending'",
       );

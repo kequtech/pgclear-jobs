@@ -11,3 +11,7 @@
 - Local slots remain occupied until timed-out or ownership-lost handlers settle.
 - One bounded recovery loop per runner, independent of execution slots.
 - Transactional schema version 2 upgrade preserving existing jobs and attempts.
+- Shared retry handling with configurable caps, optional jitter, `JobError` retry controls, and saved attempt-budget context.
+- Durable cron schedules, time zones, previews, bounded catch-up and overlap policies through the existing runner.
+- Per-definition local concurrency and database-clock relative submission delays.
+- Schema version 3 adds schedules and job occurrence metadata without rewriting existing policies.

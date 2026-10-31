@@ -96,12 +96,86 @@ not required by the core entry point or its declarations.
 - Independent runners with bounded local handler concurrency and definition selection.
 - Transactional notifications, reconnect reconciliation, delayed-job timers and fallback polling.
 - Bounded retries, policy snapshots, claim fencing, heartbeats and expired-claim recovery.
+- Capped exponential retry backoff, optional jitter, and provider-directed retry timing.
+- Recurring cron schedules with time zones, bounded catch-up, and overlap control.
 - Attempt history, retained terminal records and graceful shutdown with a deadline.
 - Explicit, transactional schema installation and upgrades with a version guard.
 
-Recurring schedules, manual retry, removal, retention controls, a worker registry and aggregate
-operational statistics are not implemented.
+Manual retry, removal, retention controls, a worker registry and aggregate operational statistics
+are not implemented.
 Execution is **at least once**: handlers must account for repeated external effects.
+
+## Retry policy
+
+Thrown errors retry automatically. Define the policy once; the runner persists the next attempt's
+time and frees the slot while waiting. Handlers do not need timers, sleeps or queue-record edits.
+
+```ts
+const syncAccount = defineJob({
+  name: 'sync-account',
+  maxAttempts: 8,
+  retryDelayMs: 1000,
+  retryMaxDelayMs: 60_000,
+  retryJitter: true,
+  concurrency: 2,
+  async handler(payload: { accountId: string }, context) {
+    await synchronizeAccount(payload.accountId, context.signal);
+  },
+});
+```
+
+Exponential backoff is the default. Without jitter, delays grow as 1, 2, 4, 8 seconds and so on,
+up to the configured cap. Optional jitter spreads each delay between half and all of that value.
+`context.attempt` and the saved `context.maxAttempts` describe the current attempt budget.
+The definition's concurrency is a per-runner limit within the runner's overall concurrency.
+
+For the exceptions to ordinary automatic retries:
+
+```ts
+import { JobError } from '@kequtech/tenon-jobs';
+
+throw new JobError('Invalid recipient', { retry: false });
+// Or honor a provider's Retry-After time without shortening the normal backoff:
+throw new JobError('Provider rate limited', { retryAt: new Date(retryAfter) });
+```
+
+Neither option extends the attempt budget. `executionTimeoutMs` still bounds an individual attempt;
+retry delays control when a subsequent attempt starts. Use `{ delayMs: 60_000 }` on `send` for an
+initial relative delay, or `runAt` for an absolute time.
+
+## Recurring jobs
+
+```ts
+await jobs(pool).schedule(
+  cleanupUploads,
+  {},
+  {
+    key: 'hourly',
+    cron: '0 * * * *',
+    timeZone: 'UTC',
+  },
+);
+
+const schedules = await jobs(pool).schedules(cleanupUploads);
+await jobs(pool).unschedule(cleanupUploads, 'hourly');
+```
+
+`cleanupUploads` is an ordinary job definition. Schedules create ordinary jobs with the same
+handlers, retry policy and inspection API. Registration is safe on every startup: the same name
+and schedule key update the existing schedule while preserving an unchanged expression's cursor.
+Schedule writes also work through `jobs(tx)` in core and `/tenon`.
+
+Schedules use deterministic five-field cron expressions, with UTC as the default time zone.
+`previewSchedule({ cron, timeZone }, { from, count })` returns upcoming Dates without a database.
+The default missed-run policy creates one catch-up job for the saved due occurrence, then resumes
+at the next future occurrence. It never replays a downtime backlog. Set `missed: 'skip'` to discard
+an occurrence more than one minute late. By default, an outstanding job from the same schedule
+causes the new occurrence to be skipped; `overlap: 'allow'` permits another job.
+
+At least one runner selecting the definition must be running. Its existing maintenance loop
+advances due schedules transactionally; there is no separate scheduling service. Generated jobs
+expose `scheduleId` and `scheduledFor`, and handlers receive `context.scheduledFor`. Removing a
+schedule stops future submissions and leaves already submitted jobs intact.
 
 ## Development
 

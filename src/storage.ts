@@ -1,4 +1,5 @@
 import type { InputValue } from '@kequtech/pgclear';
+import { executionPolicy } from './definition.js';
 import type { ExecutionPolicy } from './definition.js';
 
 export type Execute = <Row extends object>(
@@ -22,6 +23,8 @@ export interface Job<Payload = unknown> {
   readonly updatedAt: Date;
   readonly finishedAt: Date | null;
   readonly lastError: string | null;
+  readonly scheduleId: string | null;
+  readonly scheduledFor: Date | null;
 }
 
 export interface StoredJob {
@@ -39,6 +42,8 @@ export interface StoredJob {
   last_error: string | null;
   claim_token: string | null;
   deadline: string | null;
+  schedule_id: string | null;
+  scheduled_for: string | null;
 }
 
 export function jobRecord<Payload = unknown>(row: StoredJob): Job<Payload> {
@@ -49,11 +54,13 @@ export function jobRecord<Payload = unknown>(row: StoredJob): Job<Payload> {
     key: row.key,
     state: row.state,
     attempts: row.attempt_count,
-    policy: row.policy,
+    policy: executionPolicy(row.policy),
     runAt: new Date(row.run_at),
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at),
     finishedAt: row.finished_at === null ? null : new Date(row.finished_at),
     lastError: row.last_error,
+    scheduleId: row.schedule_id ?? null,
+    scheduledFor: row.scheduled_for ? new Date(row.scheduled_for) : null,
   };
 }
