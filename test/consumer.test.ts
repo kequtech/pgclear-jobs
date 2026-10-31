@@ -14,6 +14,22 @@ test('packed core and declarations work without the optional Tenon peer', async 
       }),
     ) as { filename: string }[];
     const archive = join(directory, pack[0]!.filename);
+    // npm ci caches archives but need not cache registry version metadata. Supply the
+    // installed driver's archive explicitly so this check works with an empty cache.
+    const driver = JSON.parse(
+      execFileSync(
+        'npm',
+        [
+          'pack',
+          join(process.cwd(), 'node_modules/@kequtech/pgclear'),
+          '--ignore-scripts',
+          '--json',
+          '--pack-destination',
+          directory,
+        ],
+        { encoding: 'utf8' },
+      ),
+    ) as { filename: string }[];
     await writeFile(
       join(directory, 'package.json'),
       JSON.stringify({ private: true, type: 'module' }),
@@ -25,10 +41,13 @@ test('packed core and declarations work without the optional Tenon peer', async 
         '--prefix',
         directory,
         '--offline',
+        '--cache',
+        join(directory, 'npm-cache'),
         '--ignore-scripts',
         '--no-audit',
         '--no-fund',
         archive,
+        join(directory, driver[0]!.filename),
       ],
       { stdio: 'pipe' },
     );
