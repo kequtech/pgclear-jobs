@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.test-dist/
+.env
+.env.*
+!.env.example
+*.tgz
+.agents/
+.aws/
+.codex/
