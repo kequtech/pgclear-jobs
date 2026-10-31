@@ -99,13 +99,15 @@ Execution is **at least once**: handlers must account for repeated external effe
 ```sh
 npm ci
 cp .env.example .env
-# Create tenon_jobs_test if needed; use a dedicated test database.
+# The example reuses Tenon ORM's local tenon_orm_test database.
 npm run check
 ```
 
 Tests require `TENON_JOBS_TEST_DATABASE_URL` and refuse database names without a `_test` suffix.
-They install app-owned tables and clean up only their own job definitions. They exercise real
-PostgreSQL transactions, competing workers, process death, deadlines and shutdown. No development
+The local example shares Tenon ORM's test database, with Jobs tables isolated in the `tenon_jobs`
+schema. You can configure another test database instead. Tests install app-owned tables and clean
+up only their own job definitions. They exercise real PostgreSQL transactions, competing workers,
+process death, deadlines and shutdown. No development
 database is needed for this library. CI checks PostgreSQL 16 and 18 on Node.js 24.
 
 See the [implemented API and reliability contract](docs/implementation.md). The other documents
