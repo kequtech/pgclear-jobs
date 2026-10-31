@@ -4,7 +4,7 @@ import { fork } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { once } from 'node:events';
 import test, { after, before } from 'node:test';
-import { createPool } from '@kequtech/pgclear';
+import { createPool, listen } from '@kequtech/pgclear';
 import { createTenon, unsafeSql } from '@kequtech/tenon-orm';
 import {
   defineJob,
@@ -17,6 +17,7 @@ import {
 import { jobs as tenonJobs } from '../../src/tenon.js';
 import { claimJob, finishClaim, recoverClaims, renewClaim } from '../../src/claims.js';
 import type { Execute } from '../../src/storage.js';
+import { notificationChannel } from '../../src/schema.js';
 
 const url = process.env.TENON_JOBS_TEST_DATABASE_URL;
 if (!url || !new URL(url).pathname.endsWith('_test')) {
@@ -57,7 +58,7 @@ test('installation is repeatable and safe across concurrent installers', async (
   const result = await pool.queryClassic<{ count: string }>(
     'SELECT count(*)::text AS count FROM tenon_jobs.migrations',
   );
-  assert.equal(result.rows[0]?.count, '1');
+  assert.equal(result.rows[0]?.count, '2');
 });
 
 test('pgclear scope insertion commits or rolls back with application data', async () => {
@@ -287,17 +288,17 @@ test('expired claims recover with a fresh token and reject stale outcomes and re
 test('heartbeats keep slow work owned without crossing its maximum deadline', async () => {
   let handled = 0;
   const def = definition({
-    executionTimeoutMs: 3000,
+    executionTimeoutMs: 5000,
     async handler() {
       handled++;
-      await delay(500);
+      await delay(1200);
     },
   });
   const row = await jobs(pool).send(def, 1);
   const stop = new AbortController();
   const running = runJobs(pool, [def], {
     signal: stop.signal,
-    leaseMs: 150,
+    leaseMs: 500,
     pollIntervalMs: 5,
     concurrency: 2,
   });
@@ -311,17 +312,22 @@ test('heartbeats keep slow work owned without crossing its maximum deadline', as
   assert.equal((await jobs(pool).get(row.id))?.attempts, 1);
 });
 
-test('execution deadlines bound uncooperative handlers and exhaust their attempts', async () => {
+test('execution deadlines exhaust attempts after cooperative cancellation', async () => {
   const def = definition({
     maxAttempts: 2,
     executionTimeoutMs: 80,
-    handler() {
-      return new Promise(() => {});
+    async handler(_payload, { signal }) {
+      await delay(10_000, undefined, { signal });
     },
   });
   const row = await jobs(pool).send(def, 1);
   const stop = new AbortController();
-  const running = runJobs(pool, [def], { signal: stop.signal, leaseMs: 90, pollIntervalMs: 5 });
+  const running = runJobs(pool, [def], {
+    signal: stop.signal,
+    leaseMs: 90,
+    pollIntervalMs: 5,
+    recoveryIntervalMs: 10,
+  });
   try {
     await until(async () => (await jobs(pool).get(row.id))?.state === 'failed');
   } finally {
@@ -430,5 +436,422 @@ test('driver failures reject the runner without closing the application pool', a
     );
   } finally {
     await limited.close();
+  }
+});
+
+async function listenerPid(applicationName: string): Promise<number | undefined> {
+  const { rows } = await pool.queryClassic<{ pid: number }>(
+    `SELECT pid FROM pg_stat_activity WHERE application_name = $1
+     AND state = 'idle' AND query LIKE 'LISTEN %'`,
+    [applicationName],
+  );
+  return rows[0]?.pid;
+}
+
+const quietRunner = { pollIntervalMs: 30_000, recoveryIntervalMs: 30_000, shutdownTimeoutMs: 20 };
+
+test('upgrading version 1 preserves jobs and installs transactional notifications', async () => {
+  const def = definition();
+  const rollback = new Error('rollback upgrade fixture');
+  await assert.rejects(
+    pool.transaction(async (tx) => {
+      const row = await jobs(tx).send(def, 7);
+      await tx.queryClassic('DROP TRIGGER notify_pending ON tenon_jobs.jobs');
+      await tx.queryClassic('DROP FUNCTION tenon_jobs.notify_pending()');
+      await tx.queryClassic('DELETE FROM tenon_jobs.migrations WHERE version = 2');
+      await installJobs({ transaction: (work) => tx.savepoint(work) });
+      assert.equal((await jobs(tx).get(row.id))?.payload, 7);
+      const version = await tx.queryClassic<{ version: number }>(
+        'SELECT max(version) AS version FROM tenon_jobs.migrations',
+      );
+      assert.equal(version.rows[0]?.version, 2);
+      const trigger = await tx.queryClassic<{ enabled: string }>(
+        "SELECT tgenabled AS enabled FROM pg_trigger WHERE tgrelid = 'tenon_jobs.jobs'::regclass AND tgname = 'notify_pending'",
+      );
+      assert.equal(trigger.rows[0]?.enabled, 'O');
+      throw rollback;
+    }),
+    (error) => error === rollback,
+  );
+});
+
+test('notifications commit with pgclear and Tenon operations and ignore keyed no-op updates', async () => {
+  const def = definition();
+  const received: string[] = [];
+  const listener = await listen(url!, {
+    channels: [notificationChannel],
+    onNotification: ({ payload }) => {
+      if (payload === def.name) received.push(payload);
+    },
+  });
+  const db = createTenon({ connection: url });
+  try {
+    await assert.rejects(
+      pool.transaction(async (tx) => {
+        await jobs(tx).send(def, 1);
+        await delay(30);
+        assert.equal(received.length, 0);
+        throw new Error('rollback');
+      }),
+      /rollback/,
+    );
+    await db.transaction(async (tx) => {
+      await tenonJobs(tx).send(def, 2, { key: 'commit' });
+      await delay(30);
+      assert.equal(received.length, 0);
+    });
+    await until(async () => received.length === 1);
+    await jobs(pool).send(def, 3, { key: 'commit' });
+    await delay(30);
+    assert.equal(received.length, 1);
+    const row = (await jobs(pool).find(def))[0]!;
+    await jobs(pool).reschedule(row.id, new Date(Date.now() + 60_000));
+    await until(async () => received.length === 2);
+  } finally {
+    await listener.close();
+    await db.close();
+  }
+});
+
+for (const loss of ['timeout', 'lease loss'] as const) {
+  test(`${loss} holds the local slot while independent recovery continues`, async () => {
+    const release = Promise.withResolvers<void>();
+    let active = 0;
+    let maximum = 0;
+    let started = 0;
+    let handlerSignal: AbortSignal | undefined;
+    const def = definition({
+      maxAttempts: 1,
+      executionTimeoutMs: loss === 'timeout' ? 100 : 5000,
+      async handler(value, { signal }) {
+        started++;
+        active++;
+        maximum = Math.max(maximum, active);
+        try {
+          if (value === 1) {
+            handlerSignal = signal;
+            await release.promise;
+          }
+        } finally {
+          active--;
+        }
+      },
+    });
+    const first = await jobs(pool).send(def, 1);
+    const second = await jobs(pool).send(def, 2);
+    const stop = new AbortController();
+    const running = runJobs(pool, [def], {
+      signal: stop.signal,
+      concurrency: 1,
+      leaseMs: 90,
+      recoveryIntervalMs: 10,
+      pollIntervalMs: 10,
+      shutdownTimeoutMs: 20,
+    });
+    try {
+      await until(async () => started === 1);
+      if (loss === 'lease loss') {
+        await pool.queryClassic(
+          "UPDATE tenon_jobs.jobs SET lease_until = clock_timestamp() - interval '1 second' WHERE id = $1",
+          [first.id],
+        );
+      }
+      await until(async () => (await jobs(pool).get(first.id))?.state === 'failed');
+      await until(async () => handlerSignal?.aborted === true);
+      await delay(80);
+      assert.equal(started, 1);
+      assert.equal(active, 1);
+      assert.equal((await jobs(pool).get(second.id))?.state, 'pending');
+      release.resolve();
+      await until(async () => (await jobs(pool).get(second.id))?.state === 'completed');
+      assert.equal(maximum, 1);
+      assert.equal((await jobs(pool).get(first.id))?.state, 'failed');
+    } finally {
+      stop.abort();
+      release.resolve();
+      await running;
+    }
+  });
+}
+
+test('a borrowed pool runner wakes on committed work with a long polling interval', async () => {
+  let handled = 0;
+  const def = definition({
+    handler() {
+      handled++;
+    },
+  });
+  const stop = new AbortController();
+  const running = runJobs(pool, [def], {
+    ...quietRunner,
+    signal: stop.signal,
+    notifications: { connectionString: url!, applicationName: def.name },
+  });
+  try {
+    await until(async () => Boolean(await listenerPid(def.name)));
+    await pool.transaction(async (tx) => {
+      await jobs(tx).send(def, 1);
+      await delay(50);
+      assert.equal(handled, 0);
+    });
+    await until(async () => handled === 1, 2000);
+  } finally {
+    stop.abort();
+    await running;
+  }
+  assert.equal(await listenerPid(def.name), undefined);
+  await pool.queryClassic('SELECT 1');
+});
+
+test('connection settings create a runner-owned pool and listener and close both', async () => {
+  let handled = 0;
+  const def = definition({
+    handler() {
+      handled++;
+    },
+  });
+  const stop = new AbortController();
+  const running = runJobs(
+    { connectionString: url!, applicationName: def.name, maxConnections: 2 },
+    [def],
+    {
+      ...quietRunner,
+      signal: stop.signal,
+    },
+  );
+  try {
+    await until(async () => Boolean(await listenerPid(def.name)));
+    await jobs(pool).send(def, 1);
+    await until(async () => handled === 1, 2000);
+  } finally {
+    stop.abort();
+    await running;
+  }
+  const result = await pool.queryClassic<{ count: string }>(
+    'SELECT count(*)::text AS count FROM pg_stat_activity WHERE application_name = $1',
+    [def.name],
+  );
+  assert.equal(result.rows[0]?.count, '0');
+});
+
+test('future work, retries and earlier reschedules wake without waiting for fallback polling', async () => {
+  const called: { value: number; at: number }[] = [];
+  const def = definition({
+    retryDelayMs: 150,
+    retryBackoff: 'fixed',
+    handler(value, { attempt }) {
+      called.push({ value, at: Date.now() });
+      if (value === 1 && attempt === 1) throw new Error('retry once');
+    },
+  });
+  const stop = new AbortController();
+  const running = runJobs(pool, [def], {
+    ...quietRunner,
+    signal: stop.signal,
+    notifications: { connectionString: url!, applicationName: def.name },
+  });
+  try {
+    await until(async () => Boolean(await listenerPid(def.name)));
+    const runAt = new Date(Date.now() + 150);
+    const delayed = await jobs(pool).send(def, 1, { runAt });
+    await until(async () => (await jobs(pool).get(delayed.id))?.state === 'completed', 2000);
+    assert.equal(called.length, 2);
+    assert.ok(called[0]!.at >= runAt.getTime());
+    assert.ok(called[1]!.at - called[0]!.at >= 150);
+    const later = await jobs(pool).send(def, 2, { runAt: new Date(Date.now() + 60_000) });
+    await delay(30);
+    await jobs(pool).reschedule(later.id, new Date(0));
+    await until(async () => (await jobs(pool).get(later.id))?.state === 'completed', 2000);
+  } finally {
+    stop.abort();
+    await running;
+  }
+});
+
+test('fallback polling discovers work after an unnotified row-lock release', async () => {
+  const def = definition();
+  const row = await jobs(pool).send(def, 1);
+  const stop = new AbortController();
+  let running: Promise<void> | undefined;
+  try {
+    await pool.transaction(async (tx) => {
+      await tx.queryClassic('SELECT id FROM tenon_jobs.jobs WHERE id = $1 FOR UPDATE', [row.id]);
+      running = runJobs(pool, [def], {
+        ...quietRunner,
+        signal: stop.signal,
+        pollIntervalMs: 80,
+        notifications: { connectionString: url!, applicationName: def.name },
+      });
+      await until(async () => Boolean(await listenerPid(def.name)));
+      await delay(100);
+      assert.equal((await jobs(tx).get(row.id))?.state, 'pending');
+    });
+    await until(async () => (await jobs(pool).get(row.id))?.state === 'completed', 2000);
+  } finally {
+    stop.abort();
+    await running;
+  }
+});
+
+test('listener reconnection reconciles work and restores notifications', async (t) => {
+  t.mock.method(process, 'emitWarning', () => {});
+  let handled = 0;
+  const def = definition({
+    handler() {
+      handled++;
+    },
+  });
+  const stop = new AbortController();
+  const running = runJobs(pool, [def], {
+    ...quietRunner,
+    signal: stop.signal,
+    notifications: { connectionString: url!, applicationName: def.name },
+  });
+  try {
+    await until(async () => Boolean(await listenerPid(def.name)));
+    const original = (await listenerPid(def.name))!;
+    await pool.queryClassic('SELECT pg_terminate_backend($1)', [original]);
+    await jobs(pool).send(def, 1);
+    await until(async () => handled === 1, 2000);
+    await until(async () => {
+      const next = await listenerPid(def.name);
+      return next !== undefined && next !== original;
+    });
+    await jobs(pool).send(def, 2);
+    await until(async () => handled === 2, 2000);
+  } finally {
+    stop.abort();
+    await running;
+  }
+});
+
+test('an initial listener failure polls, retries registration and recovers', async (t) => {
+  const warning = t.mock.method(process, 'emitWarning', () => {});
+  let passwordCalls = 0;
+  let handled = 0;
+  const def = definition({
+    handler() {
+      handled++;
+    },
+  });
+  const stop = new AbortController();
+  const parsed = new URL(url!);
+  const running = runJobs(pool, [def], {
+    ...quietRunner,
+    signal: stop.signal,
+    pollIntervalMs: 80,
+    notifications: {
+      connectionString: url!,
+      applicationName: def.name,
+      password() {
+        if (passwordCalls++ === 0) throw new Error('temporary credential provider failure');
+        return decodeURIComponent(parsed.password);
+      },
+    },
+  });
+  try {
+    await until(async () => warning.mock.callCount() > 0);
+    await jobs(pool).send(def, 1);
+    await until(async () => handled === 1, 2000);
+    await until(async () => Boolean(await listenerPid(def.name)));
+    assert.ok(passwordCalls >= 2);
+  } finally {
+    stop.abort();
+    await running;
+  }
+});
+
+test('shutdown bounds the wait for an already timed-out handler', async () => {
+  const release = Promise.withResolvers<void>();
+  const def = definition({
+    maxAttempts: 1,
+    executionTimeoutMs: 60,
+    async handler() {
+      await release.promise;
+    },
+  });
+  const row = await jobs(pool).send(def, 1);
+  const stop = new AbortController();
+  const running = runJobs(pool, [def], {
+    signal: stop.signal,
+    leaseMs: 90,
+    recoveryIntervalMs: 10,
+    shutdownTimeoutMs: 20,
+  });
+  try {
+    await until(async () => (await jobs(pool).get(row.id))?.state === 'failed');
+    stop.abort();
+    await Promise.race([
+      running,
+      delay(1000).then(() => {
+        throw new Error('Shutdown waited for an uncooperative handler');
+      }),
+    ]);
+  } finally {
+    stop.abort();
+    release.resolve();
+    await running;
+  }
+});
+
+test('a database failure during active work stops the runner and signals its handler', async () => {
+  const driver = createPool(url!);
+  const release = Promise.withResolvers<void>();
+  let signal: AbortSignal | undefined;
+  const def = definition({
+    async handler(_payload, context) {
+      signal = context.signal;
+      await release.promise;
+    },
+  });
+  await jobs(pool).send(def, 1);
+  const running = runJobs(driver, [def], { recoveryIntervalMs: 20 });
+  const outcome = running.then(
+    () => null,
+    (error: unknown) => error,
+  );
+  try {
+    await until(async () => signal !== undefined);
+    await driver.close({ timeoutMs: 100 });
+    assert.ok((await outcome) instanceof Error);
+    assert.equal(signal?.aborted, true);
+  } finally {
+    release.resolve();
+    await driver.close();
+  }
+});
+
+test('configured concurrency above ten holds slots without internal listener warnings', async (t) => {
+  const warning = t.mock.method(process, 'emitWarning', () => {});
+  const release = Promise.withResolvers<void>();
+  let active = 0;
+  const def = definition({
+    async handler() {
+      active++;
+      try {
+        await release.promise;
+      } finally {
+        active--;
+      }
+    },
+  });
+  const work = await Promise.all(Array.from({ length: 16 }, () => jobs(pool).send(def, 1)));
+  const stop = new AbortController();
+  const running = runJobs(pool, [def], {
+    signal: stop.signal,
+    concurrency: 16,
+    shutdownTimeoutMs: 20,
+  });
+  try {
+    await until(async () => active === 16);
+    assert.equal(warning.mock.callCount(), 0);
+    release.resolve();
+    await until(
+      async () => (await jobs(pool).find(def, { states: ['completed'] })).length === work.length,
+    );
+  } finally {
+    stop.abort();
+    release.resolve();
+    await running;
   }
 });

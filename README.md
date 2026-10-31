@@ -13,7 +13,9 @@ not a production-ready replacement for pg-boss. No npm release has been publishe
 import { createPool } from '@kequtech/pgclear';
 import { defineJob, installJobs, jobs, runJobs } from '@kequtech/tenon-jobs';
 
-const pool = createPool({ connectionString: process.env.DATABASE_URL });
+const connection = process.env.DATABASE_URL;
+if (!connection) throw new Error('DATABASE_URL is required.');
+const pool = createPool(connection);
 
 // Explicit deployment step; run before producers or consumers start.
 await installJobs(pool);
@@ -44,14 +46,20 @@ const shutdown = new AbortController();
 process.once('SIGTERM', () => shutdown.abort());
 process.once('SIGINT', () => shutdown.abort());
 try {
-  await runJobs(pool, [reminder], { signal: shutdown.signal, concurrency: 4 });
+  await runJobs(pool, [reminder], {
+    notifications: connection,
+    signal: shutdown.signal,
+    concurrency: 4,
+  });
 } finally {
   await pool.close();
 }
 ```
 
 `sendReminder` represents application code. Importing the module or defining a job does not
-open connections or start workers. The application owns the supplied pool.
+open connections or start workers. The application owns the supplied pool. The runner owns its
+dedicated notification connection and closes it on shutdown. A standalone consumer can instead
+call `runJobs(connection, [reminder], options)` to let the runner own both its pool and listener.
 
 ## Transactions and Tenon
 
@@ -85,13 +93,14 @@ not required by the core entry point or its declarations.
 - JSON payloads and typed definitions; durable and delayed submission.
 - Outstanding-work keys, scoped to the definition name.
 - Bounded lookup, pending-only edits, rescheduling and cancellation.
-- Independent runners with per-process concurrency and definition selection.
+- Independent runners with bounded local handler concurrency and definition selection.
+- Transactional notifications, reconnect reconciliation, delayed-job timers and fallback polling.
 - Bounded retries, policy snapshots, claim fencing, heartbeats and expired-claim recovery.
 - Attempt history, retained terminal records and graceful shutdown with a deadline.
-- Explicit, transactional schema installation with a version guard.
+- Explicit, transactional schema installation and upgrades with a version guard.
 
-The first version uses polling. Notifications, recurring schedules, manual retry, removal,
-retention controls, a worker registry and aggregate operational statistics are not implemented.
+Recurring schedules, manual retry, removal, retention controls, a worker registry and aggregate
+operational statistics are not implemented.
 Execution is **at least once**: handlers must account for repeated external effects.
 
 ## Development
@@ -107,8 +116,8 @@ Tests require `TENON_JOBS_TEST_DATABASE_URL` and refuse database names without a
 The local example shares Tenon ORM's test database, with Jobs tables isolated in the `tenon_jobs`
 schema. You can configure another test database instead. Tests install app-owned tables and clean
 up only their own job definitions. They exercise real PostgreSQL transactions, competing workers,
-process death, deadlines and shutdown. No development
-database is needed for this library. CI checks PostgreSQL 16 and 18 on Node.js 24.
+process death, deadlines, notification delivery, reconnects, schema upgrades and shutdown. No
+development database is needed for this library. CI checks PostgreSQL 16 and 18 on Node.js 24.
 
 See the [implemented API and reliability contract](docs/implementation.md). The other documents
 preserve the initial design discussion, including proposals not yet implemented.

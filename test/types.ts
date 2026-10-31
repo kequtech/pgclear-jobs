@@ -27,5 +27,8 @@ async function types(tx: QueryClient) {
   await jobs(pool).update(a, job.id, { id: false });
   await tenonJobs(tx).send(a, { id: '1' });
   await runJobs(pool, [a, b]);
+  await runJobs('postgresql://localhost/example', [a, b]);
+  await runJobs({ connectionString: 'postgresql://localhost/example', maxConnections: 2 }, [a]);
+  await runJobs(pool, [a], { notifications: 'postgresql://localhost/example' });
 }
 void types;

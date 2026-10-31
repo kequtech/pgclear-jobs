@@ -1,23 +1,30 @@
 import { setTimeout as delay } from 'node:timers/promises';
-import type { Pool } from '@kequtech/pgclear';
+import { setMaxListeners } from 'node:events';
+import { createPool, listen } from '@kequtech/pgclear';
+import type { ConnectionOptions, Listener, Pool, PoolOptions } from '@kequtech/pgclear';
 import { integer } from './definition.js';
 import type { JobDefinition } from './definition.js';
-import { claimJob, finishClaim, recoverClaims, renewClaim } from './claims.js';
+import { fetchJob, finishClaim, recoverClaims, renewClaim } from './claims.js';
 import type { Claim } from './claims.js';
-import { checkSchema } from './storage.js';
+import { checkSchema, notificationChannel } from './schema.js';
 import type { Execute } from './storage.js';
+import { settleOrAbort, Wakeup } from './wakeup.js';
 
 export interface RunnerOptions {
   readonly signal?: AbortSignal;
-  /** Per process, default 1. */
+  /** Maximum unfinished handlers in this runner, including timed-out handlers. Default 1. */
   readonly concurrency?: number;
-  /** Polling is authoritative, including delayed work. Default 1000. */
+  /** Listener connection for a borrowed pool, or false to disable notifications. */
+  readonly notifications?: string | ConnectionOptions | false;
+  /** Fallback interval: default 30000 with notifications, otherwise 1000. */
   readonly pollIntervalMs?: number;
+  /** One recovery batch per interval, independently of execution slots. Default 1000. */
+  readonly recoveryIntervalMs?: number;
   /** Heartbeats run every third of this interval. Default 30000. */
   readonly leaseMs?: number;
   /** Finish active work for this long after abort; then abandon claims. Default 30000. */
   readonly shutdownTimeoutMs?: number;
-  /** Bound each driver operation, including pool acquisition. Default 10000. */
+  /** Bound each driver operation, including pool acquisition and listener startup. Default 10000. */
   readonly databaseTimeoutMs?: number;
 }
 
@@ -53,13 +60,24 @@ async function executeClaim(
   const abandonAttempt = () => controller.abort(new Error('Runner shutdown deadline reached'));
   abandon.addEventListener('abort', abandonAttempt, { once: true });
   if (abandon.aborted) abandonAttempt();
-  let onAbort: () => void = () => {};
-  const interrupted = new Promise<{ kind: 'abandoned' }>((resolve) => {
-    onAbort = () => resolve({ kind: 'abandoned' });
-    controller.signal.addEventListener('abort', onAbort, { once: true });
-    if (controller.signal.aborted) onAbort();
+  const interrupted = Promise.withResolvers<void>();
+  const onAbort = () => interrupted.resolve();
+  controller.signal.addEventListener('abort', onAbort, { once: true });
+  if (controller.signal.aborted) onAbort();
+  const handler = Promise.resolve().then(async () => {
+    if (controller.signal.aborted) return;
+    try {
+      await definition.handler(claim.payload, {
+        id: claim.id,
+        attempt: claim.attempt_count,
+        signal: controller.signal,
+      });
+      return null;
+    } catch (error) {
+      return errorText(error);
+    }
   });
-  const heartbeat = async (): Promise<{ kind: 'abandoned' }> => {
+  const heartbeat = async () => {
     while (!monitors.signal.aborted) {
       await pause(Math.max(1, Math.floor(leaseMs / 3)), monitors.signal);
       if (monitors.signal.aborted) break;
@@ -68,32 +86,16 @@ async function executeClaim(
         break;
       }
     }
-    return { kind: 'abandoned' };
   };
   const beat = heartbeat();
+  const timeout = pause(claim.policy.executionTimeoutMs, monitors.signal).then(() => {
+    if (!monitors.signal.aborted) controller.abort(new Error('Job execution deadline reached'));
+  });
   try {
-    const handler = Promise.resolve().then(async () => {
-      if (controller.signal.aborted) return { kind: 'abandoned' as const };
-      try {
-        await definition.handler(claim.payload, {
-          id: claim.id,
-          attempt: claim.attempt_count,
-          signal: controller.signal,
-        });
-        return { kind: 'finished' as const, error: null };
-      } catch (error) {
-        return { kind: 'finished' as const, error: errorText(error) };
-      }
-    });
-    const timeout = pause(claim.policy.executionTimeoutMs, monitors.signal).then(() => {
-      controller.abort(new Error('Job execution deadline reached'));
-      return { kind: 'abandoned' as const };
-    });
-    const result = await Promise.race([handler, interrupted, timeout, beat]);
-    if (result.kind === 'finished' && !controller.signal.aborted) {
-      await finishClaim(execute, claim, result.error);
+    const result = await Promise.race([handler, interrupted.promise, timeout, beat]);
+    if (!controller.signal.aborted && result !== undefined) {
+      await finishClaim(execute, claim, result);
     }
-    // Abandoned attempts retain their token until bounded recovery observes expiry.
   } finally {
     monitors.abort();
     controller.abort(new Error('Attempt finished'));
@@ -101,16 +103,46 @@ async function executeClaim(
     abandon.removeEventListener('abort', abandonAttempt);
     await beat;
   }
+  // Cancellation ends claim ownership; the handler still occupies its local slot
+  // until it settles or shutdown deliberately spends its grace.
+  await settleOrAbort(handler, abandon);
 }
 
-/** Long-running consumer. Rejects on database faults; the application owns restart policy. */
+function notificationWarning(error: unknown): void {
+  process.emitWarning('Job notifications are unavailable; continuing with polling.', {
+    code: 'TENON_JOBS_NOTIFICATIONS_UNAVAILABLE',
+    detail: errorText(error),
+  });
+}
+
+function listenerConnection(connection: string | PoolOptions): string | ConnectionOptions {
+  if (typeof connection === 'string') return connection;
+  const {
+    maxConnections,
+    maxWaiting,
+    acquireTimeoutMs,
+    idleTimeoutMs,
+    maxLifetimeMs,
+    ...settings
+  } = connection;
+  return settings;
+}
+
+/** A supplied pool is borrowed. Connection settings create a runner-owned pool and listener. */
 export async function runJobs(
-  pool: Pool,
+  connection: Pool | string | PoolOptions,
   definitions: readonly JobDefinition<unknown>[],
   options: RunnerOptions = {},
 ): Promise<void> {
   const concurrency = integer(options.concurrency ?? 1, 'concurrency', 1, 1000);
-  const pollMs = integer(options.pollIntervalMs ?? 1000, 'pollIntervalMs');
+  const borrowed = typeof connection !== 'string' && 'queryClassic' in connection;
+  const notifications =
+    options.notifications ?? (borrowed ? false : listenerConnection(connection));
+  const pollMs = integer(
+    options.pollIntervalMs ?? (notifications === false ? 1000 : 30_000),
+    'pollIntervalMs',
+  );
+  const recoveryMs = integer(options.recoveryIntervalMs ?? 1000, 'recoveryIntervalMs');
   const leaseMs = integer(options.leaseMs ?? 30_000, 'leaseMs', 30);
   const shutdownMs = integer(options.shutdownTimeoutMs ?? 30_000, 'shutdownTimeoutMs', 0);
   const databaseMs = integer(options.databaseTimeoutMs ?? 10_000, 'databaseTimeoutMs');
@@ -119,44 +151,106 @@ export async function runJobs(
     throw new TypeError('Supply at least one definition, with no duplicate names.');
   }
   if (options.signal?.aborted) return;
+  const pool = borrowed ? connection : createPool(connection);
+  const names = [...byName.keys()];
   const stop = new AbortController();
   const abandon = new AbortController();
+  setMaxListeners(concurrency + 1, abandon.signal);
+  const wake = new Wakeup();
+  const active = new Set<Promise<void>>();
+  const failures: unknown[] = [];
+  let connected = false;
   let shutdownTimer: ReturnType<typeof setTimeout> | undefined;
   const shutdown = () => {
     stop.abort();
     if (shutdownTimer === undefined) shutdownTimer = setTimeout(() => abandon.abort(), shutdownMs);
   };
+  const fail = (error: unknown) => {
+    if (!failures.length) failures.push(error);
+    stop.abort();
+    abandon.abort();
+  };
   options.signal?.addEventListener('abort', shutdown, { once: true });
   const execute: Execute = (text, values) =>
     pool.queryClassic(text, values, { timeoutMs: databaseMs });
+  let maintenance: Promise<void> | undefined;
+  let listening: Promise<void> | undefined;
+  const startListener = async () => {
+    if (notifications === false) return;
+    while (!stop.signal.aborted) {
+      let listener: Listener | undefined;
+      const closed = Promise.withResolvers<void>();
+      try {
+        listener = await listen(listenerConnection(notifications), {
+          channels: [notificationChannel],
+          reconnect: true,
+          signal: stop.signal,
+          timeoutMs: databaseMs,
+          onNotification: ({ payload }) => {
+            if (byName.has(payload)) wake.notify();
+          },
+          onStatus: (status) => {
+            connected = status.state === 'connected';
+            if (status.state === 'disconnected') notificationWarning(status.error);
+            if (status.state === 'closed') closed.resolve();
+            // Always reconcile after registration or a delivery gap.
+            wake.notify();
+          },
+        });
+        await settleOrAbort(closed.promise, stop.signal);
+      } catch (error) {
+        if (!stop.signal.aborted) notificationWarning(error);
+      } finally {
+        connected = false;
+        await listener?.close({ timeoutMs: databaseMs });
+      }
+      if (!stop.signal.aborted) await pause(1000, stop.signal);
+    }
+  };
   try {
     await checkSchema(execute);
-    const worker = async () => {
-      try {
-        while (!stop.signal.aborted) {
-          await recoverClaims(execute);
-          if (stop.signal.aborted) break;
-          const claim = await claimJob(execute, [...byName.keys()], leaseMs);
-          if (claim) {
-            // If shutdown arrived during the claim, deliberately abandon it for recovery.
-            if (stop.signal.aborted) break;
-            await executeClaim(execute, claim, byName.get(claim.name)!, leaseMs, abandon.signal);
-          } else {
-            await pause(pollMs, stop.signal);
-          }
-        }
-      } catch (error) {
-        stop.abort();
-        abandon.abort();
-        throw error;
+    listening = startListener().catch(fail);
+    maintenance = (async () => {
+      while (!stop.signal.aborted) {
+        if (await recoverClaims(execute)) wake.notify();
+        await pause(recoveryMs, stop.signal);
       }
-    };
-    const results = await Promise.allSettled(Array.from({ length: concurrency }, worker));
-    const failure = results.find((result) => result.status === 'rejected');
-    if (failure?.status === 'rejected') throw failure.reason;
+    })().catch(fail);
+    while (!stop.signal.aborted) {
+      const version = wake.version;
+      if (active.size < concurrency) {
+        const { claim, delayMs } = await fetchJob(execute, names, leaseMs);
+        if (stop.signal.aborted) break;
+        if (claim) {
+          const task = executeClaim(
+            execute,
+            claim,
+            byName.get(claim.name)!,
+            leaseMs,
+            abandon.signal,
+          )
+            .catch(fail)
+            .finally(() => {
+              active.delete(task);
+              wake.notify();
+            });
+          active.add(task);
+          continue;
+        }
+        const backstop = notifications !== false && !connected ? Math.min(pollMs, 1000) : pollMs;
+        await wake.wait(version, Math.min(backstop, Math.max(1, delayMs ?? backstop)), stop.signal);
+      } else {
+        await wake.wait(version, 2_147_483_647, stop.signal);
+      }
+    }
+  } catch (error) {
+    fail(error);
   } finally {
+    stop.abort();
+    await Promise.all([...active, maintenance, listening]);
     options.signal?.removeEventListener('abort', shutdown);
     clearTimeout(shutdownTimer);
-    abandon.abort();
+    if (!borrowed) await pool.close({ timeoutMs: databaseMs });
   }
+  if (failures.length) throw failures[0];
 }

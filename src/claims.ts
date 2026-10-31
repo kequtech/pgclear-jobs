@@ -17,10 +17,19 @@ export async function claimJob(
   names: readonly string[],
   leaseMs: number,
 ): Promise<Claim | null> {
-  const { rows } = await execute<{ record: Claim }>(
+  return (await fetchJob(execute, names, leaseMs)).claim;
+}
+
+/** Claim and the next scheduled wakeup share one snapshot, avoiding a due-time race. */
+export async function fetchJob(
+  execute: Execute,
+  names: readonly string[],
+  leaseMs: number,
+): Promise<{ claim: Claim | null; delayMs: number | null }> {
+  const { rows } = await execute<{ record: Claim | null; delay_ms: number | null }>(
     `WITH candidate AS (
       SELECT id FROM tenon_jobs.jobs
-      WHERE state = 'pending' AND run_at <= clock_timestamp()
+      WHERE state = 'pending' AND run_at <= statement_timestamp()
         AND name IN (SELECT jsonb_array_elements_text($1::jsonb))
       ORDER BY run_at, id LIMIT 1 FOR UPDATE SKIP LOCKED
     ), claimed AS (
@@ -33,10 +42,15 @@ export async function claimJob(
     ), history AS (
       INSERT INTO tenon_jobs.attempts (job_id, number, token)
       SELECT id, attempt_count, claim_token FROM claimed
-    ) SELECT to_jsonb(claimed) AS record FROM claimed`,
+    ) SELECT (SELECT to_jsonb(c) FROM claimed c) AS record,
+      CASE WHEN EXISTS (SELECT FROM claimed) THEN NULL ELSE (
+        SELECT ceil(extract(epoch FROM (min(run_at) - clock_timestamp())) * 1000)::double precision
+        FROM tenon_jobs.jobs WHERE state = 'pending' AND run_at > statement_timestamp()
+          AND name IN (SELECT jsonb_array_elements_text($1::jsonb))
+      ) END AS delay_ms`,
     [JSON.stringify(names), randomUUID(), leaseMs],
   );
-  return rows[0]?.record ?? null;
+  return { claim: rows[0]?.record ?? null, delayMs: rows[0]?.delay_ms ?? null };
 }
 
 export async function renewClaim(
