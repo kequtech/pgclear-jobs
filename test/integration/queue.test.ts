@@ -22,7 +22,7 @@ test('installation is repeatable and safe across concurrent installers', async (
   const result = await pool.queryClassic<{ count: string }>(
     'SELECT count(*)::text AS count FROM tenon_jobs.migrations',
   );
-  assert.equal(result.rows[0]?.count, '3');
+  assert.equal(result.rows[0]?.count, '4');
 });
 
 test('pgclear scope insertion commits or rolls back with application data', async () => {
@@ -437,8 +437,9 @@ test('upgrading version 1 preserves jobs and installs transactional notification
     pool.transaction(async (tx) => {
       const row = await jobs(tx).send(def, 7);
       await tx.queryClassic('DROP TABLE tenon_jobs.schedules');
+      await tx.queryClassic('DROP INDEX tenon_jobs.jobs_terminal');
       await tx.queryClassic(
-        'ALTER TABLE tenon_jobs.jobs DROP COLUMN schedule_id, DROP COLUMN scheduled_for',
+        'ALTER TABLE tenon_jobs.jobs DROP COLUMN schedule_id, DROP COLUMN scheduled_for, DROP COLUMN retry_of',
       );
       await tx.queryClassic('DROP TRIGGER notify_pending ON tenon_jobs.jobs');
       await tx.queryClassic('DROP FUNCTION tenon_jobs.notify_pending()');
@@ -448,7 +449,7 @@ test('upgrading version 1 preserves jobs and installs transactional notification
       const version = await tx.queryClassic<{ version: number }>(
         'SELECT max(version) AS version FROM tenon_jobs.migrations',
       );
-      assert.equal(version.rows[0]?.version, 3);
+      assert.equal(version.rows[0]?.version, 4);
       const trigger = await tx.queryClassic<{ enabled: string }>(
         "SELECT tgenabled AS enabled FROM pg_trigger WHERE tgrelid = 'tenon_jobs.jobs'::regclass AND tgname = 'notify_pending'",
       );

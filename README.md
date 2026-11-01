@@ -1,13 +1,13 @@
 # Tenon Jobs
 
-An experimental TypeScript library for durable PostgreSQL jobs. A sister to
-[Tenon ORM](https://github.com/kequtech/tenon-orm), built directly on
-[pgclear](https://github.com/kequtech/pgclear), inspired by
-[pg-boss](https://github.com/timgit/pg-boss).
+Typed, durable PostgreSQL jobs built on [pgclear](https://github.com/kequtech/pgclear),
+with optional [Tenon ORM](https://github.com/kequtech/tenon-orm) integration.
+Inspired by [pg-boss](https://github.com/timgit/pg-boss).
 
-Define behavior once, submit through an explicit database scope, and run committed jobs
-independently. Requires Node.js 24+ and PostgreSQL 16+. This is an initial implementation,
-not a production-ready replacement for pg-boss. No npm release has been published by this project.
+Requires Node.js 24+ and PostgreSQL 16+. Experimental; no npm release has been published.
+Execution is **at least once**. Handlers must tolerate repeated effects.
+
+## Define, submit, run
 
 ```ts
 import { createPool } from '@kequtech/pgclear';
@@ -17,31 +17,26 @@ const connection = process.env.DATABASE_URL;
 if (!connection) throw new Error('DATABASE_URL is required.');
 const pool = createPool(connection);
 
-// Explicit deployment step; run before producers or consumers start.
+// Explicit deployment step, before producers or runners start.
 await installJobs(pool);
 
 const reminder = defineJob({
   name: 'appointment-reminder',
   maxAttempts: 5,
   async handler(payload: { appointmentId: string }, { signal }) {
-    // Call application code here; use signal for cooperative cancellation.
     await sendReminder(payload.appointmentId, signal);
   },
 });
 
-const job = await jobs(pool).send(
+await jobs(pool).send(
   reminder,
   { appointmentId: 'appointment-42' },
   {
     key: 'appointment-42',
-    runAt: new Date(Date.now() + 60_000),
+    delayMs: 60_000,
   },
 );
 
-await jobs(pool).reschedule(job.id, new Date(Date.now() + 120_000));
-console.log(await jobs(pool).get(job.id));
-
-// Run alongside your server, or in a separate process importing the definitions.
 const shutdown = new AbortController();
 process.once('SIGTERM', () => shutdown.abort());
 process.once('SIGINT', () => shutdown.abort());
@@ -56,22 +51,21 @@ try {
 }
 ```
 
-`sendReminder` represents application code. Importing the module or defining a job does not
-open connections or start workers. The application owns the supplied pool. The runner owns its
-dedicated notification connection and closes it on shutdown. A standalone consumer can instead
-call `runJobs(connection, [reminder], options)` to let the runner own both its pool and listener.
+`sendReminder` represents application code. Imports and definitions open no connections.
+The runner is a long-running promise: observe its rejection and let app supervision restart it.
+A supplied pool belongs to the application. Passing connection settings to `runJobs` instead
+creates a runner-owned pool and notification listener.
 
-## Transactions and Tenon
+## Join an application transaction
 
-Core `jobs(pool)` and `jobs(transaction)` use the supplied pgclear scope. For Tenon, import
-the optional integration; it uses Tenon's public query API and joins its transaction:
+Core `jobs(pool)` and `jobs(tx)` use pgclear. For a Tenon database or transaction, use `/tenon`:
 
 ```ts
 import { jobs } from '@kequtech/tenon-jobs/tenon';
 
 await db.transaction(async (tx) => {
   const appointment = await saveAppointment(tx, input);
-  const job = await jobs(tx).send(
+  await jobs(tx).send(
     reminder,
     { appointmentId: appointment.id },
     {
@@ -79,71 +73,40 @@ await db.transaction(async (tx) => {
       runAt: appointment.reminderAt,
     },
   );
-  await saveReminderJobId(tx, appointment.id, job.id);
 });
 ```
 
-Commit makes the job visible; rollback removes it along with the application's writes.
-The handler runs later in an independent worker. It receives the persisted payload and
-an attempt context, never the submitting transaction. Tenon ORM is an optional peer and is
-not required by the core entry point or its declarations.
+Commit exposes the job; rollback removes it with the app's writes. Handlers run independently
+and never receive the submitting transaction. Tenon ORM is optional for the core package.
 
-## Current capabilities
+## Submit once, coalesce, or update
 
-- JSON payloads and typed definitions; durable and delayed submission.
-- Outstanding-work keys, scoped to the definition name.
-- Bounded lookup, pending-only edits, rescheduling and cancellation.
-- Independent runners with bounded local handler concurrency and definition selection.
-- Transactional notifications, reconnect reconciliation, delayed-job timers and fallback polling.
-- Bounded retries, policy snapshots, claim fencing, heartbeats and expired-claim recovery.
-- Capped exponential retry backoff, optional jitter, and provider-directed retry timing.
-- Recurring cron schedules with time zones, bounded catch-up, and overlap control.
-- Attempt history, retained terminal records and graceful shutdown with a deadline.
-- Explicit, transactional schema installation and upgrades with a version guard.
+- `send(def, payload, { id })` uses a caller-selected UUID. Reusing it returns the original job,
+  including after completion, for as long as that record is retained.
+- `send(def, payload, { key })` returns unchanged pending or running work with that key.
+  Terminal jobs release the key. IDs and keys cannot be combined.
+- `upsert(def, payload, { key, delayMs })` inserts or replaces pending payload/timing atomically.
+  Omitted timing preserves an existing execution time. Running work raises `JobStateError`.
+- `sendMany(def, [{ id, payload }, ...])` inserts up to 1000 jobs in one statement, skips conflicts,
+  and returns only inserted records.
 
-Manual retry, removal, retention controls, a worker registry and aggregate operational statistics
-are not implemented.
-Execution is **at least once**: handlers must account for repeated external effects.
+All operations also work through `jobs(tx)`. Keep transactions short: a conflicting submission
+may lock an outstanding record and delay its heartbeat.
 
-## Retry policy
+## Retries and schedules
 
-Thrown errors retry automatically. Define the policy once; the runner persists the next attempt's
-time and frees the slot while waiting. Handlers do not need timers, sleeps or queue-record edits.
-
-```ts
-const syncAccount = defineJob({
-  name: 'sync-account',
-  maxAttempts: 8,
-  retryDelayMs: 1000,
-  retryMaxDelayMs: 60_000,
-  retryJitter: true,
-  concurrency: 2,
-  async handler(payload: { accountId: string }, context) {
-    await synchronizeAccount(payload.accountId, context.signal);
-  },
-});
-```
-
-Exponential backoff is the default. Without jitter, delays grow as 1, 2, 4, 8 seconds and so on,
-up to the configured cap. Optional jitter spreads each delay between half and all of that value.
-`context.attempt` and the saved `context.maxAttempts` describe the current attempt budget.
-The definition's concurrency is a per-runner limit within the runner's overall concurrency.
-
-For the exceptions to ordinary automatic retries:
+Thrown errors retry automatically with capped exponential backoff. Definitions support fixed
+backoff, jitter, per-attempt timeouts and per-runner concurrency limits. For exceptions:
 
 ```ts
 import { JobError } from '@kequtech/tenon-jobs';
 
 throw new JobError('Invalid recipient', { retry: false });
-// Or honor a provider's Retry-After time without shortening the normal backoff:
-throw new JobError('Provider rate limited', { retryAt: new Date(retryAfter) });
+// Or honor a provider's retry time without shortening policy backoff:
+throw new JobError('Rate limited', { retryAt: new Date(retryAfter) });
 ```
 
-Neither option extends the attempt budget. `executionTimeoutMs` still bounds an individual attempt;
-retry delays control when a subsequent attempt starts. Use `{ delayMs: 60_000 }` on `send` for an
-initial relative delay, or `runAt` for an absolute time.
-
-## Recurring jobs
+Schedules are durable producers of ordinary jobs:
 
 ```ts
 await jobs(pool).schedule(
@@ -155,43 +118,44 @@ await jobs(pool).schedule(
     timeZone: 'UTC',
   },
 );
-
-const schedules = await jobs(pool).schedules(cleanupUploads);
-await jobs(pool).unschedule(cleanupUploads, 'hourly');
 ```
 
-`cleanupUploads` is an ordinary job definition. Schedules create ordinary jobs with the same
-handlers, retry policy and inspection API. Registration is safe on every startup: the same name
-and schedule key update the existing schedule while preserving an unchanged expression's cursor.
-Schedule writes also work through `jobs(tx)` in core and `/tenon`.
+Register at startup. An unchanged expression preserves its cursor across restarts. Defaults
+create one catch-up occurrence after downtime and skip new occurrences while that schedule has
+outstanding work. At least one runner selecting the definition must be running.
 
-Schedules use deterministic five-field cron expressions, with UTC as the default time zone.
-`previewSchedule({ cron, timeZone }, { from, count })` returns upcoming Dates without a database.
-The default missed-run policy creates one catch-up job for the saved due occurrence, then resumes
-at the next future occurrence. It never replays a downtime backlog. Set `missed: 'skip'` to discard
-an occurrence more than one minute late. By default, an outstanding job from the same schedule
-causes the new occurrence to be skipped; `overlap: 'allow'` permits another job.
+## Inspect and maintain
 
-At least one runner selecting the definition must be running. Its existing maintenance loop
-advances due schedules transactionally; there is no separate scheduling service. Generated jobs
-expose `scheduleId` and `scheduledFor`, and handlers receive `context.scheduledFor`. Removing a
-schedule stops future submissions and leaves already submitted jobs intact.
+```ts
+const counts = await jobs(pool).stats(reminder);
+const page = await jobs(pool).find(reminder, { states: ['failed'], limit: 100 });
+const last = page.at(-1);
+const next = last
+  ? await jobs(pool).find(reminder, {
+      states: ['failed'],
+      after: last.cursor,
+      limit: 100,
+    })
+  : [];
+const retry = await jobs(pool).retry(failedJobId);
+// retry has a new ID and fresh budget; retry.retryOf links to the retained failure.
+await jobs(pool).prune(reminder, { before: new Date(Date.now() - 7 * 86_400_000) });
+```
+
+Cleanup is explicit, bounded, and preserves failures unless requested. Removing a job also removes
+its attempt history and releases its stable-ID deduplication. Store business results in app records.
 
 ## Development
 
 ```sh
 npm ci
 cp .env.example .env
-# The example reuses Tenon ORM's local tenon_orm_test database.
 npm run check
 ```
 
-Tests require `TENON_JOBS_TEST_DATABASE_URL` and refuse database names without a `_test` suffix.
-The local example shares Tenon ORM's test database, with Jobs tables isolated in the `tenon_jobs`
-schema. You can configure another test database instead. Tests install app-owned tables and clean
-up only their own job definitions. They exercise real PostgreSQL transactions, competing workers,
-process death, deadlines, notification delivery, reconnects, schema upgrades and shutdown. No
-development database is needed for this library. CI checks PostgreSQL 16 and 18 on Node.js 24.
+The example reuses Tenon ORM's local `tenon_orm_test` database. Tests require
+`TENON_JOBS_TEST_DATABASE_URL` ending in `_test`; Jobs data lives in the reserved `tenon_jobs`
+schema, and tests clean up their own definitions. CI checks Node.js 24 with PostgreSQL 16 and 18.
 
-See the [implemented API and reliability contract](docs/implementation.md). The other documents
-preserve the initial design discussion, including proposals not yet implemented.
+See the [API](docs/api.md), [reliability contract](docs/storage-and-reliability.md), and
+[architecture](docs/architecture.md). Pending work lives in [todo.md](todo.md).

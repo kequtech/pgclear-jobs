@@ -69,6 +69,14 @@ const migrations = [
     'CREATE UNIQUE INDEX jobs_schedule_occurrence ON tenon_jobs.jobs (schedule_id, scheduled_for)',
     "CREATE INDEX jobs_schedule_outstanding ON tenon_jobs.jobs (schedule_id) WHERE state IN ('pending', 'running')",
   ],
+  [
+    'ALTER TABLE tenon_jobs.jobs ADD COLUMN retry_of uuid',
+    'DROP INDEX tenon_jobs.jobs_schedule_occurrence',
+    `CREATE UNIQUE INDEX jobs_schedule_occurrence ON tenon_jobs.jobs (schedule_id, scheduled_for)
+     WHERE retry_of IS NULL`,
+    `CREATE INDEX jobs_terminal ON tenon_jobs.jobs (name, finished_at, id)
+     WHERE state IN ('completed', 'failed', 'cancelled')`,
+  ],
 ] as const;
 
 /** Explicit, transactional installation and upgrades. Never called by record operations. */

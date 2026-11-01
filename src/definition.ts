@@ -47,6 +47,12 @@ export function databaseText(value: unknown, name: string, max = Infinity): stri
   return value;
 }
 
+export function uuid(value: unknown): string {
+  if (typeof value !== 'string' || !/^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/i.test(value))
+    throw new TypeError('Job ID must be a UUID.');
+  return value.toLowerCase();
+}
+
 export function defineJob<Payload>(options: JobOptions<Payload>): JobDefinition<Payload> {
   if (typeof options.name !== 'string' || !options.name.trim() || options.name.length > 200) {
     throw new TypeError('Job name must contain 1–200 characters and cannot be blank.');

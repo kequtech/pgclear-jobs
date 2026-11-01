@@ -169,7 +169,7 @@ export async function advanceSchedules(
            SELECT $1::uuid, $2, $3::jsonb, $4::jsonb, $5::uuid, $6::timestamptz
            WHERE $7::boolean OR NOT EXISTS (SELECT FROM tenon_jobs.jobs
              WHERE schedule_id = $5::uuid AND state IN ('pending', 'running'))
-           ON CONFLICT (schedule_id, scheduled_for) DO NOTHING RETURNING id`,
+           ON CONFLICT (schedule_id, scheduled_for) WHERE retry_of IS NULL DO NOTHING RETURNING id`,
             [
               randomUUID(),
               schedule.name,

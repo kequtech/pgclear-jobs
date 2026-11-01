@@ -29,6 +29,7 @@
     "dist/**/*.js",
     "dist/**/*.d.ts",
     "docs/",
+    "todo.md",
     "CHANGELOG.md"
   ],
   "scripts": {

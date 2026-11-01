@@ -17,3 +17,9 @@
 - Schema version 3 adds schedules and job occurrence metadata without rewriting existing policies.
 - Recheck claim expiry after row-lock waits; account for delayed claim/heartbeat responses and bound local leases.
 - Reject PostgreSQL-incompatible payload text before SQL and sanitize persisted error messages.
+- Stable submission UUIDs and single-statement bulk submission with conflict skipping.
+- Atomic pending upsert with explicit active-work conflicts and preserved execution policy.
+- Precise cursor pagination, snapshot state counts, explicit terminal removal and bounded pruning.
+- Manual retry creates linked fresh jobs while preserving failures, budgets and schedule context.
+- Schema version 4 adds retry links, occurrence-index rules and a terminal-cleanup index.
+- Rewrite documentation around the implemented API; keep pending work and pg-boss case assessments in `todo.md`.

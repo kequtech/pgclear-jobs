@@ -1,23 +1,42 @@
 import { randomUUID } from 'node:crypto';
 import type { Executor, InputValue } from '@kequtech/pgclear';
-import { databaseText, executionPolicy, integer, serializePayload } from './definition.js';
+import { databaseText, executionPolicy, integer, serializePayload, uuid } from './definition.js';
 import type { JobDefinition } from './definition.js';
 import { JobNotFoundError, JobStateError } from './errors.js';
-import { jobRecord, states } from './storage.js';
+import { jobRecord, readCursor, states } from './storage.js';
 import type { Execute, Job, JobState, StoredJob } from './storage.js';
 import { listSchedules, saveSchedule } from './schedules.js';
 import type { Schedule, ScheduleOptions } from './schedules.js';
 
-export interface SendOptions {
-  readonly key?: string;
+export interface TimingOptions {
   readonly runAt?: Date;
   readonly delayMs?: number;
+}
+
+/** Stable submission identity and outstanding-work coalescing are separate contracts. */
+export type SendOptions = TimingOptions &
+  ({ readonly id?: string; readonly key?: never } | { readonly id?: never; readonly key?: string });
+export interface UpsertOptions extends TimingOptions {
+  readonly key: string;
+}
+export type Submission<Payload> = SendOptions & { readonly payload: Payload };
+export type TerminalState = Extract<JobState, 'completed' | 'failed' | 'cancelled'>;
+export interface PruneOptions {
+  readonly before: Date;
+  readonly states?: readonly TerminalState[];
+  readonly limit?: number;
+}
+export interface JobStats extends Readonly<Record<JobState, number>> {
+  readonly total: number;
+  readonly ready: number;
+  readonly delayed: number;
 }
 
 export interface FindOptions {
   readonly key?: string;
   readonly states?: readonly JobState[];
   readonly limit?: number;
+  readonly after?: string;
 }
 
 export interface Attempt {
@@ -30,9 +49,26 @@ export interface Attempt {
 
 function timestamp(date: Date): string {
   if (!(date instanceof Date) || !Number.isFinite(date.getTime())) {
-    throw new TypeError('runAt must be a valid Date.');
+    throw new TypeError('Expected a valid Date.');
   }
   return date.toISOString();
+}
+
+function submission(
+  payload: unknown,
+  options: { readonly id?: string; readonly key?: string } & TimingOptions,
+) {
+  if (options.id !== undefined && options.key !== undefined)
+    throw new TypeError('Use a stable id or an outstanding-work key, not both.');
+  if (options.runAt !== undefined && options.delayMs !== undefined)
+    throw new TypeError('Use runAt or delayMs, not both.');
+  return {
+    id: options.id === undefined ? randomUUID() : uuid(options.id),
+    payload: serializePayload(payload),
+    key: options.key === undefined ? null : databaseText(options.key, 'key', 500),
+    run_at: options.runAt === undefined ? null : timestamp(options.runAt),
+    delay_ms: integer(options.delayMs ?? 0, 'delayMs', 0),
+  };
 }
 
 export class JobRecords {
@@ -64,38 +100,88 @@ export class JobRecords {
     );
   }
 
-  async send<Payload>(
+  send<Payload>(
     definition: JobDefinition<Payload>,
     payload: NoInfer<Payload>,
     options: SendOptions = {},
   ): Promise<Job<Payload>> {
-    const key = options.key === undefined ? null : databaseText(options.key, 'key', 500);
-    if (options.runAt !== undefined && options.delayMs !== undefined)
-      throw new TypeError('Use runAt or delayMs, not both.');
+    return this.submit(definition, payload, options, false);
+  }
+
+  async upsert<Payload>(
+    definition: JobDefinition<Payload>,
+    payload: NoInfer<Payload>,
+    options: UpsertOptions,
+  ): Promise<Job<Payload>> {
+    databaseText(options.key, 'key', 500);
+    const job = await this.submit(definition, payload, options, true);
+    if (job.state !== 'pending') throw new JobStateError(job.id);
+    return job;
+  }
+
+  private async submit<Payload>(
+    definition: JobDefinition<Payload>,
+    payload: Payload,
+    options: SendOptions,
+    replace: boolean,
+  ): Promise<Job<Payload>> {
+    const input = submission(payload, options);
+    const conflict =
+      options.id === undefined
+        ? "(name, key) WHERE key IS NOT NULL AND state IN ('pending', 'running')"
+        : '(id)';
+    const assignment = replace
+      ? `payload = CASE WHEN j.state = 'pending' THEN excluded.payload ELSE j.payload END,
+         run_at = CASE WHEN j.state = 'pending' AND ${options.runAt !== undefined || options.delayMs !== undefined}
+           THEN excluded.run_at ELSE j.run_at END,
+         updated_at = CASE WHEN j.state = 'pending' THEN clock_timestamp() ELSE j.updated_at END`
+      : 'id = j.id';
     const result = await this.execute<{ record: StoredJob }>(
       `INSERT INTO tenon_jobs.jobs AS j (id, name, payload, key, run_at, policy)
        VALUES ($1, $2, $3::jsonb, $4, COALESCE($5::timestamptz,
          clock_timestamp() + $7::double precision * interval '1 millisecond'), $6::jsonb)
-       ON CONFLICT (name, key) WHERE key IS NOT NULL AND state IN ('pending', 'running')
-       DO UPDATE SET key = j.key
+       ON CONFLICT ${conflict} DO UPDATE SET ${assignment}
        RETURNING to_jsonb(j) AS record`,
       [
-        randomUUID(),
+        input.id,
         definition.name,
-        serializePayload(payload),
-        key,
-        options.runAt === undefined ? null : timestamp(options.runAt),
+        input.payload,
+        input.key,
+        input.run_at,
         JSON.stringify(executionPolicy(definition)),
-        integer(options.delayMs ?? 0, 'delayMs', 0),
+        input.delay_ms,
       ],
     );
-    return jobRecord<Payload>(result.rows[0]!.record);
+    const job = jobRecord<Payload>(result.rows[0]!.record);
+    if (job.name !== definition.name) throw new JobStateError(job.id);
+    return job;
+  }
+
+  async sendMany<Payload>(
+    definition: JobDefinition<Payload>,
+    inputs: readonly Submission<NoInfer<Payload>>[],
+  ): Promise<readonly Job<Payload>[]> {
+    integer(inputs.length, 'batch size', 0, 1000);
+    if (!inputs.length) return [];
+    const prepared = Array.from(inputs, ({ payload, ...options }) => {
+      const input = submission(payload, options);
+      return { ...input, payload: JSON.parse(input.payload) as unknown };
+    });
+    const { rows } = await this.execute<{ record: StoredJob }>(
+      `INSERT INTO tenon_jobs.jobs AS j (id, name, payload, key, run_at, policy)
+       SELECT x.id, $1, COALESCE(x.payload, 'null'::jsonb), x.key,
+         COALESCE(x.run_at, clock_timestamp() + x.delay_ms * interval '1 millisecond'), $3::jsonb
+       FROM jsonb_to_recordset($2::jsonb) AS x(id uuid, payload jsonb, key text, run_at timestamptz, delay_ms double precision)
+       ON CONFLICT DO NOTHING RETURNING to_jsonb(j) AS record`,
+      [definition.name, JSON.stringify(prepared), JSON.stringify(executionPolicy(definition))],
+    );
+    return rows.map(({ record }) => jobRecord<Payload>(record));
   }
 
   async get(id: string): Promise<Job | null> {
     const result = await this.execute<{ record: StoredJob }>(
       'SELECT to_jsonb(j) AS record FROM tenon_jobs.jobs j WHERE id = $1::uuid',
-      [id],
+      [uuid(id)],
     );
     return result.rows[0] ? jobRecord(result.rows[0].record) : null;
   }
@@ -106,16 +192,20 @@ export class JobRecords {
   ): Promise<readonly Job<Payload>[]> {
     if (options.states?.some((state) => !states.includes(state)))
       throw new TypeError('Unknown job state.');
+    const after = options.after === undefined ? null : readCursor(options.after);
     const result = await this.execute<{ record: StoredJob }>(
       `SELECT to_jsonb(j) AS record FROM tenon_jobs.jobs j
        WHERE name = $1 AND ($2::text IS NULL OR key = $2)
        AND ($3::jsonb IS NULL OR state IN (SELECT jsonb_array_elements_text($3)))
+       AND ($5::timestamptz IS NULL OR (created_at, id) > ($5::timestamptz, $6::uuid))
        ORDER BY created_at, id LIMIT $4`,
       [
         definition.name,
         options.key === undefined ? null : databaseText(options.key, 'key', 500),
         options.states === undefined ? null : JSON.stringify(options.states),
         integer(options.limit ?? 100, 'limit', 1, 1000),
+        after?.[0] ?? null,
+        after?.[1] ?? null,
       ],
     );
     return result.rows.map(({ record }) => jobRecord<Payload>(record));
@@ -142,13 +232,87 @@ export class JobRecords {
     return this.mutate(id, "state = 'cancelled', finished_at = clock_timestamp()", []);
   }
 
+  /** A fresh job and attempt budget; the failed record and its history remain intact. */
+  async retry(id: string): Promise<Job> {
+    const { rows } = await this.execute<{ record: StoredJob }>(
+      `WITH source AS MATERIALIZED (
+         SELECT * FROM tenon_jobs.jobs WHERE id = $1::uuid AND state = 'failed' FOR SHARE
+       ) INSERT INTO tenon_jobs.jobs AS j (id, name, payload, key, policy, retry_of, schedule_id, scheduled_for)
+       SELECT $2::uuid, name, payload, key, policy, id, schedule_id, scheduled_for FROM source
+       ON CONFLICT DO NOTHING RETURNING to_jsonb(j) AS record`,
+      [uuid(id), randomUUID()],
+    );
+    if (rows[0]) return jobRecord(rows[0].record);
+    if (!(await this.get(id))) throw new JobNotFoundError(id);
+    throw new JobStateError(id);
+  }
+
+  async remove(id: string): Promise<boolean> {
+    const { rows } = await this.execute<{ id: string }>(
+      `DELETE FROM tenon_jobs.jobs WHERE id = $1::uuid
+       AND state IN ('completed', 'failed', 'cancelled') RETURNING id`,
+      [uuid(id)],
+    );
+    if (rows.length) return true;
+    if (await this.get(id)) throw new JobStateError(id);
+    return false;
+  }
+
+  async prune(definition: JobDefinition<unknown>, options: PruneOptions): Promise<number> {
+    const selected = options.states ?? ['completed', 'cancelled'];
+    if (selected.some((state) => !['completed', 'failed', 'cancelled'].includes(state)))
+      throw new TypeError('Only terminal job states can be pruned.');
+    const { rows } = await this.execute<{ id: string }>(
+      `WITH candidates AS (
+         SELECT id FROM tenon_jobs.jobs WHERE name = $1 AND finished_at < $2::timestamptz
+           AND state IN ('completed', 'failed', 'cancelled')
+           AND state IN (SELECT jsonb_array_elements_text($3::jsonb))
+         ORDER BY finished_at, id LIMIT $4 FOR UPDATE SKIP LOCKED
+       ) DELETE FROM tenon_jobs.jobs j USING candidates c WHERE j.id = c.id RETURNING j.id`,
+      [
+        definition.name,
+        timestamp(options.before),
+        JSON.stringify(selected),
+        integer(options.limit ?? 100, 'limit', 1, 1000),
+      ],
+    );
+    return rows.length;
+  }
+
+  async stats(definition: JobDefinition<unknown>): Promise<JobStats> {
+    const { rows } = await this.execute<{ state: JobState; count: number; ready: number }>(
+      `SELECT state, count(*)::double precision AS count,
+         count(*) FILTER (WHERE state = 'pending' AND run_at <= statement_timestamp())::double precision AS ready
+       FROM tenon_jobs.jobs WHERE name = $1 GROUP BY state`,
+      [definition.name],
+    );
+    const counts: Record<JobState, number> = {
+      pending: 0,
+      running: 0,
+      completed: 0,
+      failed: 0,
+      cancelled: 0,
+    };
+    let ready = 0;
+    for (const row of rows) {
+      counts[row.state] = row.count;
+      ready += row.ready;
+    }
+    return {
+      ...counts,
+      ready,
+      delayed: counts.pending - ready,
+      total: rows.reduce((sum, row) => sum + row.count, 0),
+    };
+  }
+
   private async mutate<Payload = unknown>(
     id: string,
     assignment: string,
     values: readonly InputValue[],
     name?: string,
   ): Promise<Job<Payload>> {
-    const args: InputValue[] = [id, ...values];
+    const args: InputValue[] = [uuid(id), ...values];
     const nameFilter = name === undefined ? '' : ` AND name = $${args.push(name)}`;
     const result = await this.execute<{ record: StoredJob }>(
       `UPDATE tenon_jobs.jobs j SET ${assignment}, updated_at = clock_timestamp()
@@ -175,7 +339,7 @@ export class JobRecords {
     }>(
       `SELECT to_jsonb(a) AS record FROM tenon_jobs.attempts a
        WHERE job_id = $1::uuid ORDER BY number DESC LIMIT $2`,
-      [id, integer(options.limit ?? 100, 'limit', 1, 1000)],
+      [uuid(id), integer(options.limit ?? 100, 'limit', 1, 1000)],
     );
     return rows.map(({ record }) => ({
       number: record.number,

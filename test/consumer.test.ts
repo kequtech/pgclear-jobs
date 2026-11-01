@@ -69,6 +69,15 @@ test('packed core and declarations work without the optional Tenon peer', async 
       const definition = defineJob({ name: 'typed', handler(payload: { id: string }) {} });
       const record = await jobs(pool).send(definition, { id: 'example' });
       const id: string = record.payload.id;
+      const batch = await jobs(pool).sendMany(definition, [{ payload: { id: 'batch' } }]);
+      const updated = await jobs(pool).upsert(definition, { id: 'latest' }, { key: 'one' });
+      const cursor: string = updated.cursor;
+      const retryOf: string | null = updated.retryOf;
+      await jobs(pool).find(definition, { after: cursor });
+      // @ts-expect-error Batch payloads cannot widen the shipped definition.
+      await jobs(pool).sendMany(definition, [{ payload: { id: false } }]);
+      void batch;
+      void retryOf;
       // @ts-expect-error Invalid payload must fail against shipped declarations.
       await jobs(pool).send(definition, { id: 1 });
       void runJobs(pool, [definition]);
