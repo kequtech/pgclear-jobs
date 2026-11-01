@@ -3,7 +3,7 @@ export const notificationChannel = 'pgclear_jobs_ready';
 export const migrationLockSql = 'SELECT pg_advisory_xact_lock(187032712, 1)';
 export const downSql = 'DROP SCHEMA IF EXISTS pgclear_jobs CASCADE';
 
-export const upStatements = [
+export const upStatements: readonly string[] = [
   migrationLockSql,
   'CREATE SCHEMA pgclear_jobs',
   `CREATE TABLE pgclear_jobs.schema_version (version integer PRIMARY KEY)`,
@@ -126,4 +126,4 @@ export const upStatements = [
       END LOOP;
     END;
   $$`,
-] as const;
+];

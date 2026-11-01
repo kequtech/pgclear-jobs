@@ -1,5 +1,6 @@
 import type { InputValue } from '@kequtech/pgclear';
-import { executionPolicy, uuid } from './definition.js';
+import { executionPolicy } from './definition.js';
+import { uuid } from './validation.js';
 import type { ExecutionPolicy } from './definition.js';
 
 export type Execute = <Row extends object>(

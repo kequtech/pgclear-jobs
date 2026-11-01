@@ -1,8 +1,11 @@
-# Integrating a pgclear-backed query library
+# Query-library integration
 
-`@kequtech/pgclear-jobs/integration` exports `createJobsIntegration`, the `JobsIntegration` contract
-and the generic `Execute` SQL capability. An integration lives in the consuming query library and
-uses the same Jobs engine as native pgclear applications. No ORM package is installed by Jobs.
+`@kequtech/pgclear-jobs/integration` exports `createJobsIntegration`, `JobsIntegration`, `JobsApi`,
+and `Execute`. This is for a pgclear-backed query library to implement once. Ordinary pgclear
+applications use the root API directly.
+
+The factory binds definitions, record operations, and the existing runner to the integration's
+transaction type. No new pool or per-handler wrapper is needed.
 
 ```ts
 import type { Pool } from '@kequtech/pgclear';
@@ -27,52 +30,54 @@ const api = createJobsIntegration<Database, Scope>({
 });
 ```
 
-The example uses a deliberately small query scope. A real query library implements `execute` using
-its normal query API and `transaction` using its configured database's transaction API.
+This example supplies a minimal custom scope. A real query library uses its configured database and
+transaction API, preserving its normal query guards and observation.
 
-## Contract
+## Required capabilities
 
-- `pool(database)` returns the existing application-owned pgclear pool for claims, maintenance and
-  scheduling. It must not construct another pool. Pre-aborted runners do not resolve this capability.
-- `execute(scope)` returns an executor for that exact database or transaction scope. It must preserve
-  the query library's serialization, scope lifetime, parameters and query observation. It resolves
-  only when the SQL result is available, and does not commit independently inside a transaction.
-- `transaction(database, work, options)` opens a real transaction, supplies its application query
-  scope to `work`, and commits only when that callback and accepted SQL have succeeded. A rejection
-  rolls it back. Forward cancellation options to pgclear so an ignored handler signal cannot retain
-  a usable transaction. Preserve original and aggregate driver errors, including uncertain commits.
+`pool(database)` returns the existing application-owned pgclear pool. Claims, maintenance, and
+schedule advancement use it. It must not construct another pool. A pre-aborted runner does not
+resolve this capability.
 
-The factory returns `defineJob`, `jobs` and `runJobs` bound to these scopes. Transactional handlers
-receive the integration's transaction type; native and integrated runners cannot interchange
-transactional definitions. Record operations accept either definition while preserving payload
-types, since they only read definition metadata. The integration decides what application facade
-to expose; it does not change queue policy or reimplement claims/retries.
+`execute(scope)` returns a generic parameterized SQL executor for that exact root or transaction
+scope. It resolves to `{ rows }` after SQL completes. Preserve the query library's serialization,
+parameters, result handling, scope expiry, and query observation. Transaction execution must not
+escape to a root pool or commit independently.
 
-Completion runs through the transaction executor after the application handler returns. Its database
-budget is enforced through the transaction's abort signal, so the adapter does not need a second SQL
-timeout API. The engine refuses completion after lost ownership and waits for transaction cleanup.
-The original JavaScript handler keeps its local slot until it settles or shutdown abandons it.
+`transaction(database, work, options)` opens a real transaction and supplies its query-library
+scope. Commit only when the callback and accepted work succeed; roll back on rejection. Forward
+pgclear transaction options, especially `signal`, through acquisition, execution, and commit.
+Preserve driver/aggregate errors, including uncertain commits and cleanup failures.
 
-## Lifecycle forwarding
+## Bound API and types
 
-Forward the factory's `runJobs(database, definitions, options)` promise directly. pgclear-jobs owns
-worker startup, claiming, maintenance, notifications, graceful shutdown, handler cancellation and
-driver cleanup. Its runner options and abort signal have the same behavior with native and integrated
-scopes. Startup and operational failures reject the worker promise for the application's supervision.
+The factory returns:
 
-The query library only checks its own enablement/open state and supplies the capabilities above.
-The application requests shutdown through the signal and awaits the worker before closing its
-database. The Jobs engine leaves the shared pool open. No separate worker/drain implementation
-or per-handler lifecycle wrapper is required in the integration.
+- `defineJob`: definitions whose transactional handlers receive the supplied `Tx` type.
+- `jobs(scope)`: the ordinary record facade using that scope's executor.
+- `runJobs(database, definitions, options?)`: the same worker engine with integrated transactions.
 
-## Query-library implementation still pending
+`JobDefinition<Payload, Tx>` and `TransactionalHandlerContext<Tx>` are available from the root module.
+Record operations accept native or integrated definitions while preserving payload types because
+they only need metadata. Runners must match the transaction type expected by transactional handlers.
 
-Tenon ORM will own its integration, forward transaction cancellation options, and expose `db.jobs`
-and `tx.jobs`. Those changes are tracked in the [implementation plan](implementation-plan.md).
-The former Jobs-owned `/tenon` module and borrowed-pool facade have been removed.
+Successful completion runs through the transaction executor after the handler returns. Its SQL
+budget is enforced through the transaction's abort signal, so the integration needs no separate
+statement-timeout API. The engine refuses stale completion and waits for transaction cleanup.
+Unsettled JavaScript retains its local slot until it settles or shutdown spends its grace.
 
-When implementing the ORM facade, port its earlier regression examples from Git commit `3925fa4`,
-especially affected-row savepoint recovery after a SQL error, concurrent guarded query ordering,
-configured query observation, transaction expiry, producer rollback and notification commit timing.
-The core now independently exercises the shared transaction engine using native and custom scopes,
-including cancellation, ownership takeover, completion lock waits and lost rollback/commit responses.
+## Lifecycle
+
+Forward `runJobs` options and its promise directly. pgclear-jobs owns startup, dispatch, heartbeats,
+maintenance, notifications, graceful shutdown, handler cancellation, and driver cleanup. Startup and
+operational failures reject that promise. The engine leaves the shared pool open.
+
+A query library may check its own enablement/open state before forwarding. The application connects
+its process signals and supervision, requests shutdown, awaits the worker, then closes the database.
+Keep queue algorithms and worker lifecycle inside pgclear-jobs.
+
+## Tenon ORM
+
+The Jobs package contains no Tenon module or dependency. Tenon's planned `db.jobs`/`tx.jobs` API is
+not implemented here. See the [handoff plan](implementation-plan.md) for its binding, cancellation
+forwarding, migration generation, and acceptance checks.

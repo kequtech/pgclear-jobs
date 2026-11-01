@@ -1,108 +1,58 @@
 # Architecture
 
-This describes the pgclear-only engine. The [implementation plan](implementation-plan.md)
-tracks the future integration owned by Tenon ORM.
-
-pgclear-jobs has three public concepts: a definition, a persisted record, and an explicit runner.
-Definitions combine a typed handler with fixed execution policy. Record methods use the database
-scope supplied by the caller. Runners execute committed work independently.
+pgclear-jobs has three main concepts: a typed definition, a persisted job, and an explicit runner.
+Definitions are inert. Record methods use the database scope supplied by the caller. Runners execute
+committed work and own their worker lifecycle.
 
 ## Boundaries
 
-```text
-application ───────────→ pgclear pool
-pgclear-jobs ──────────→ pgclear (required peer)
-query-library adapter → pgclear-jobs/integration
-```
+| Component                 | Responsibility                                                                               |
+| ------------------------- | -------------------------------------------------------------------------------------------- |
+| Application               | Business effects/idempotency, when workers run, process supervision, pool ownership          |
+| pgclear-jobs              | Jobs SQL, claims, execution, retries, leases, scheduling, retention, worker startup/shutdown |
+| pgclear                   | Connections, SQL transport, transaction/savepoint lifetime, cancellation, driver cleanup     |
+| Query-library integration | Supply the existing pool, exact query scope, and real transaction opener                     |
 
-There is no ORM import, dependency or ORM-specific entry point. A packaged consumer test verifies
-runtime and declarations with only the required driver peer and private runtime dependencies.
-`createJobsIntegration` binds a query library's executor, root pool and transaction opener to the
-same record and runner implementation. This boundary contains no registry or pool proxy.
+There is no ORM dependency, global pool, mutable queue registry, or per-handler adapter. The public
+integration factory binds another pgclear-backed query API to the same engine. Tenon ORM's facade
+belongs in Tenon, with no copied queue logic.
 
-One reserved `pgclear_jobs` schema holds jobs, attempts, schedules and schema version metadata across all
-definitions and processes. Schema changes belong to explicit `installJobs`/`migrateJobs` deployment
-work or application migrations generated from the package's canonical up/down SQL.
-No DDL runs during submission. There is no mutable queue registry or implicit global database.
+One reserved `pgclear_jobs` schema stores jobs, attempts, schedules, and a compatibility marker.
+Installation/removal is explicit. One concrete up/down SQL pair serves both the standalone command
+and application-owned migration files. There is no incremental migration engine.
 
-| Module                           | Responsibility                                                     |
-| -------------------------------- | ------------------------------------------------------------------ |
-| `definition.ts`                  | Definitions, policy and lossless input validation                  |
-| `records.ts`                     | Submission, inspection, pending mutations and explicit maintenance |
-| `storage.ts`                     | Persisted/public records and precise cursors                       |
-| `claims.ts`                      | Atomic ownership, heartbeats, outcomes and expired-claim recovery  |
-| `runner.ts`, `wakeup.ts`         | Dispatch, cancellation, notifications and listener lifecycle       |
-| `schedules.ts`                   | Calendar calculation and transactional recurring production        |
-| `retention.ts`                   | Bounded automatic cleanup of completed/cancelled history           |
-| `schema.ts`                      | Atomic schema installation/removal and runtime compatibility       |
-| `schema-sql.ts`, `migrations.ts` | One canonical schema and its exported up/down SQL                  |
-| `cli.ts`                         | Standalone migrate command                                         |
-| `integration.ts`, `pgclear.ts`   | Typed query/transaction binding and the native binding             |
+## Execution path
 
-## Execution
+A producer submits through `jobs(pool)` or `jobs(tx)`. Transactional notifications appear with the
+committed work. The runner selects due jobs using short atomic claims and fresh ownership tokens,
+then invokes handlers outside the claim statement.
 
-Keyed `request` submission uses an installed PostgreSQL function so head locking and successor
-coalescing remain atomic through either a pool or application transaction. A terminal-transition
-trigger releases successors; claims and wakeup timers select only unblocked work.
+An ordinary handler has a separate completion statement. A transactional handler uses a fresh real
+transaction for its application writes and fenced successful completion. Handler errors roll back
+before failure/retry bookkeeping. Unknown commits and cleanup failures propagate to supervision.
 
-An app writes data and jobs in one transaction. After commit, a runner claims a due record in a short
-statement. Ordinary handlers use their own app transactions, followed by a separate fenced outcome.
-Opt-in transactional handlers receive a scope whose writes and successful completion commit together.
-Refused completion forces rollback; handler failure is recorded after rollback. An integration
-opens its own application's transaction API and supplies its executor for successful completion.
-The driver signal cancels that transaction independently of application JavaScript settlement.
-App results and domain idempotency belong in app records.
+Handler settlement and transaction settlement are tracked separately. A cancelled driver scope can
+roll back while uncooperative JavaScript continues; that JavaScript retains its local slot. Attempt
+execution keeps those rules together in one module. The runner handles dispatch, maintenance,
+notifications, and worker shutdown around it.
 
-A runner shares the app event loop or lives in a separately supervised process. It creates no threads.
-One dispatcher rotates eligible definitions as it fills local slots; one maintenance loop recovers claims, advances schedules and
-cleans up expired completed/cancelled history.
-Per-definition concurrency divides those same slots without a polling loop per worker. Notifications
-wake the dispatcher, and a timer tracks the next due job. SQL rows remain authoritative. Claims,
-next-due lookup and automatic cleanup use bounded index scans per selected definition. No new queue
-policy, reservation API, claim batching or partitioning is needed for backlog fairness.
+A terminal trigger promotes keyed successors atomically. A request function handles head/successor
+contention within the caller's SQL scope. Recurring schedules submit ordinary jobs in bounded
+transactions. Automatic cleanup uses a completed/cancelled-only index and bounded batches.
 
-## API scope and comparison with pg-boss
+## Source layout
 
-The comparison below uses upstream pg-boss documentation reviewed on 1 November 2026. Site currently
-requests pg-boss `^12.36.0`; current upstream examples may include newer behavior. A smaller exported
-API does not by itself make an application easier to operate.
+| Module                                                  | Responsibility                                                                        |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `definition.ts`, `validation.ts`                        | Typed definitions, execution policy, input validation                                 |
+| `records.ts`, `storage.ts`                              | Public record operations, mapping, precise pagination cursors                         |
+| `claims.ts`                                             | Atomic claims, renewals, outcomes, expired-claim recovery                             |
+| `attempt.ts`                                            | One handler attempt: lease/deadline monitoring, transaction, completion, cancellation |
+| `runner.ts`, `wakeup.ts`                                | Dispatch, maintenance, notification lifecycle, abortable waits                        |
+| `schedules.ts`, `retention.ts`                          | Recurring production and automatic history cleanup                                    |
+| `schema-sql.ts`, `schema.ts`, `migrations.ts`, `cli.ts` | One schema and explicit setup/removal                                                 |
+| `integration.ts`, `pgclear.ts`                          | Query/transaction bindings and the native binding                                     |
 
-| Workflow                             | pg-boss                                                              | pgclear-jobs                                                                       |
-| ------------------------------------ | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| Ordinary work                        | Start one instance, create a named queue, then use `send` and `work` | Define a typed job, use `jobs(scope).send`, and select definitions in one runner   |
-| Application transaction              | Pass an ORM/transaction adapter in the operation's `db` option       | Use `jobs(tx)` through pgclear or a query-library-owned integration                |
-| Atomic handler writes and completion | Opt into transactional workers                                       | Set `transactional: true` on a definition and use the supplied `tx`                |
-| Keyed latest-state work              | Choose a queue policy and combine it with keyed submission/upsert    | Use keyed `request`, with one head and one coalesced successor                     |
-| Recurring work                       | Register a cron schedule on the instance                             | Register a cron schedule through the existing record facade                        |
-| Lifecycle                            | The instance manages workers and connection setup                    | A runner promise and abort signal use the application pool; a listener is optional |
-
-Sources: pg-boss [getting started](https://pgboss.io/),
-[jobs](https://pgboss.io/api/jobs), [workers](https://pgboss.io/api/workers),
-[adapters](https://pgboss.io/api/adapters), [queues](https://pgboss.io/api/queues), and
-[scheduling](https://pgboss.io/api/scheduling).
-
-pg-boss's ordinary path is already short. Core advantages are typed definitions and a specific
-follow-up contract; Tenon integration belongs to the ORM. Explicit runner supervision and shared-pool
-lifecycle remain responsibilities for the application author. Automatic completed/cancelled retention removes a separate maintenance task.
-They should not be described as automatic simplification or a sufficient reason to migrate.
-
-The application vocabulary is `send` for individual events and `request` for latest-state work.
-There is no first-wins keyed submission or pending upsert API. Known records can still be explicitly
-edited by ID for operational use. Every runner uses an application-owned pool; polling works without
-listener settings, and a dedicated listener is an optional latency optimization. Schedules have one
-catch-up/overlap contract. These choices reduce the number of interacting behaviors an application
-must choose or understand.
-
-Retry policy, concurrency, execution limits, timing, time zones and retention remain configurable
-because applications can reasonably need different behavior. Retries use capped exponential backoff
-with jitter by default. Undefined object fields follow normal JSON omission rules, avoiding extra
-payload-normalization code for optional TypeScript properties. Cleanup reuses the existing bounded
-maintenance loop; it introduces no new scheduler, worker or external service.
-
-Lease deadlines, fencing, conservative cancellation and explicit uncertain-commit reconciliation are
-part of the reliability contract. Removing them would weaken guarantees in ordinary database
-outages. Keep those internals and their behavioral tests; avoid another recovery framework or
-transaction replay. In particular, a database operation timeout bounds a different responsibility
-from a worker's locally confirmed lease. Transport tests exercise that distinction without adding
-runtime options. Broader queue policies, dependency graphs, result storage and driver/backend variants
-remain outside the intended scope.
+The [reliability contract](storage-and-reliability.md) explains the failure boundaries. The
+[integration guide](integration.md) defines the narrow query-library contract. Future Tenon work is
+separate from the current API and tracked in the [implementation plan](implementation-plan.md).

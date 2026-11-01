@@ -1,16 +1,14 @@
-# pgclear-jobs documentation
+# Documentation
 
-These documents describe the implemented library.
+The current API is pgclear-only. Tenon ORM's facade is separate planned work.
 
-- [Schema migrations](migrations.md): the install/remove command and one up/down SQL pair for application migration files.
-- [Integration API](integration.md): the typed transaction/executor boundary for another pgclear-backed query library.
+- [Quick start](../README.md): install, submit, and run work.
+- [API reference](api.md): definitions, record operations, schedules, errors, and runner options.
+- [Reliability and operations](storage-and-reliability.md): guarantees, failure boundaries, and shutdown.
+- [Schema setup](migrations.md): one install/remove command and the exported up/down SQL pair.
+- [Integration contract](integration.md): bind a pgclear-backed query library to the existing engine.
+- [Architecture](architecture.md): ownership and source responsibilities.
+- [Development and release](development.md): tests, load profiles, packaging, and releases.
 
-- [Implementation plan](implementation-plan.md): target package boundaries, opt-in ORM integration,
-  generated SQL migrations and the staged implementation sequence. Proposed APIs are marked there.
-
-- [Quick start](../README.md): definitions, transactions, runners and common workflows.
-- [API](api.md): public methods, options, return values and errors.
-- [Storage and reliability](storage-and-reliability.md): claims, retries, schedules and failure boundaries.
-- [Architecture](architecture.md): responsibilities and the relationship to pg-boss.
-
-Outstanding work and adoption checks live in [todo.md](../todo.md).
+The [Tenon implementation plan](implementation-plan.md) describes future ORM work, not additional
+current APIs. Remaining adoption checks are in [todo.md](../todo.md).

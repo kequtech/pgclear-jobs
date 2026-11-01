@@ -1,13 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Executor, InputValue } from '@kequtech/pgclear';
-import {
-  databaseText,
-  executionPolicy,
-  integer,
-  serializePayload,
-  uuid,
-  validateOptions,
-} from './definition.js';
+import { databaseText, integer, serializePayload, uuid, validateOptions } from './validation.js';
+import { executionPolicy } from './definition.js';
 import type { JobDefinition } from './definition.js';
 import { JobNotFoundError, JobStateError } from './errors.js';
 import { jobRecord, readCursor, states } from './storage.js';

@@ -1,262 +1,161 @@
-# Storage and reliability
+# Reliability and operations
 
-## Ownership and lifecycle
+Execution is at least once. PostgreSQL owns durable state; handlers own application effects.
+Fenced completion protects queue records from stale attempts. It cannot undo an email, stop arbitrary
+JavaScript, or prevent a second business event from being submitted.
 
-The app owns persistence. `pgclear-jobs migrate` installs the reserved `pgclear_jobs` schema in one
-transaction, serialized by an advisory transaction lock. Repeated installation leaves current storage
-intact. `pgclear-jobs migrate down` intentionally removes the entire namespace and all Jobs data.
-Stop producers and workers before removal. A breaking schema change can use an explicit down/up reset;
-there is no incremental migration engine. Application migration tools can extract the same up/down SQL.
-An internal schema marker lets workers reject incompatible storage. Producers never install storage;
-runners only check compatibility at startup. Do not add application objects to this reserved schema.
+## State and ownership
 
 ```text
 pending → running → completed
-             ├──→ pending   (retry with backoff)
-             └──→ failed    (permanent failure or exhausted budget)
+             ├──→ pending (automatic retry)
+             └──→ failed
 pending → cancelled
-blocked pending follow-up ── predecessor terminal ──→ eligible pending
-failed ── manual retry ──→ new pending record linked to the retained failure
+blocked successor → eligible pending (when its predecessor terminates)
+failed → fresh pending record (explicit manual retry)
 ```
 
-All SQL uses bound parameters through a narrow execution boundary. `jobs(tx)` participates in the
-caller's transaction without owning it. Commits expose jobs and notifications together; rollbacks
-expose neither. A facade retains its scope and obeys its lifetime. Keep app transactions short.
+A claim selects due, unblocked work with `FOR UPDATE SKIP LOCKED`, changes its state, assigns a fresh
+token, and inserts attempt history in one SQL statement. The claim commits before invoking a handler.
+Every renewal and outcome checks the current token and a live lease. Successful completion also
+checks the execution deadline. Checks run after obtaining the row lock, so time spent waiting cannot
+authorize a stale outcome.
 
-Definitions may opt into `transactional: true`. Claims still commit separately before execution.
-The runner opens a pgclear transaction and supplies it as `tx`; an integration can supply its own
-pgclear-backed transaction API. Application writes, follow-up submissions, successful attempt history and completion commit
-together. A failed completion fence or handler exception rolls back application writes; handler
-failure/retry bookkeeping is recorded afterward using the ordinary fenced statement. Native driver
-cancellation expires and rolls back the transaction even when JavaScript ignores the abort signal,
-while the unfinished handler retains its local slot. Heartbeats use separate pooled connections and
-the job row is locked only during completion, not throughout the handler. These transactions hold a
-connection and application locks until commit/rollback, so keep them short and leave pool capacity
-for renewals and maintenance. Database/commit failures reject the runner without replaying the
-transaction; an uncertain commit includes both application effects and completion, or neither.
-Only operations through the supplied transaction participate in this guarantee.
-Expected cancellation is suppressed only when driver cleanup succeeds. Lost rollback responses and
-connection-release failures reject the runner even during shutdown, preserving aggregate driver
-errors and the handler failure's sanitized cause for supervision.
+The runner renews ownership while a handler is active. Claim and renewal round trips consume a
+conservative local budget measured with a monotonic clock. A late response cannot start an expired
+attempt or extend locally assumed ownership. PostgreSQL time governs the stored lease; large clock
+changes can expire work. Pass the handler's abort signal through external dependencies.
 
-## Submission identities and updates
+One maintenance loop per runner recovers expired claims, advances schedules, and prunes eligible
+history. Recovery handles up to 100 expired claims per pass, across all definitions, independently
+of available handler slots. Retry/error history and state change together.
 
-A job UUID identifies a retained submission across every state. Reusing an explicit ID returns the
-original record; deleting it releases that deduplication. An outstanding key identifies one unblocked
-pending/running head per definition, optionally with one blocked pending follow-up created by
-`request`. Terminal transitions release the key or transfer it atomically to that successor.
-Neither contract guarantees exactly-once effects after execution begins.
+A cancelled handler retains its local slot until it settles or worker shutdown spends its grace.
+Another worker can recover its expired claim in the meantime. Concurrency limits therefore bound
+unfinished JavaScript in one runner, not all execution across the deployment. Avoid blocking the
+Node event loop, and supervise workers that can stall in uncooperative dependencies.
 
-Database uniqueness arbitrates collisions. Stable-ID submission uses a no-op conflict update to
-return the original record even under contention. Independent `send` and `sendMany` jobs have no key;
-only `request` coalesces keyed work. Bulk insertion skips duplicate IDs and reports only inserted jobs. Manual retry inserts a fresh
-linked record, checks that the source is failed, and refuses an occupied outstanding key without a
-unique-constraint error that would abort the app transaction.
+## Transaction boundaries
 
-No automatic SQL retry hides uncertain commit outcomes. Reconcile lost responses with retained
-submission IDs or application state. Repeating unkeyed submission or manual retry can create more work.
+`jobs(tx)` uses the caller's exact transaction. Application writes and submitted jobs commit or roll
+back together. Jobs and their notifications become visible only after commit. The facade does not
+open a hidden transaction or silently retry an application transaction.
 
-`request` uses an installed PostgreSQL function to lock or create the outstanding head. Unstarted
-heads can be replaced. Once an attempt has started, requests preserve the head, including during
-retry backoff, and coalesce into a separately indexed successor. Fresh statement snapshots handle
-completion or cancellation during conflict lock waits. No transaction is opened behind the caller's
-scope and no application-supplied callback runs under these locks.
+An ordinary handler's writes and queue completion are separate operations. A process can fail after
+its writes commit but before completion; recovery may run it again. Use application idempotency or
+opt into a transactional handler for short database work.
 
-A terminal-transition trigger promotes the pending successor in the same transaction as completion,
-permanent failure, exhausted recovery or pending cancellation. It clears the blocker only after the
-old head releases its unique outstanding-key slot. Claims and next-due timers exclude blocked rows.
-Promotion emits a transactional notification even when payload and requested time stay unchanged.
-Rollback restores both predecessor and successor, and terminal cleanup cannot strand pending work.
-Automatic retries retain the blocker and original payload; successors get their own IDs, saved
-policies, attempt budgets and history. This guarantees coalesced trailing work, not one execution
-per request. Concurrent requests use database serialization order rather than producer timestamps.
+With `transactional: true`, the runner opens a cancellable transaction and passes it as `tx`:
 
-## Transport failures and reconciliation
+- Writes through `tx`, follow-up submissions, successful attempt history, and completion commit together.
+- Handler exceptions roll back application writes before failure/retry bookkeeping is recorded separately.
+- Lost ownership or refused completion rolls back the transaction.
+- Deadline and shutdown cancellation expire the driver scope even if the handler never returns.
+- Commit and rollback/release failures reach worker supervision. Expected cancellation is suppressed
+  only when driver cleanup succeeds.
 
-A rejected submission or transaction is not proof that PostgreSQL rolled it back. The server may
-have committed while its reply was lost. Errors propagate from pgclear without transaction replay;
-an uncertain managed COMMIT reports `PGCLEAR_COMMIT_UNKNOWN`. The queue does not infer success or
-failure from a disconnected socket or wrap that uncertainty in another recovery API.
+Only operations on that supplied scope participate. Other pools and external calls remain separate.
+Retain idempotency for effects outside the transaction and for distinct submissions of the same
+business operation. Await every transaction operation and do not retain the scope after use.
 
-For a submission that must be reconciled, choose its UUID once, before attempting the write, and
-retain it outside the uncertain transaction. `get(id)` finds the retained record and repeating
-`send(def, originalPayload, { id })` returns it unchanged, even after completion. Stable-ID protection
-lasts only while the record is retained. It does not make external handler effects exactly once.
+Transactional handlers hold a pool connection and application locks until commit/rollback. Claims,
+heartbeats, maintenance, and other application work need additional connections. Keep transactions
+short; an external call inside one also holds those resources while waiting.
 
-For application writes and a job submitted through `jobs(tx)`, reconcile application state as well
-as the job. A missing row while the original transaction is still alive is inconclusive. Wait until
-that transaction has a definitive outcome before treating absence as a rollback, or use app-owned
-unique request identities that arbitrate a concurrent retry. Do not blindly rerun business writes
-because job submission rejected. Outstanding keys and `request` coalescing are not stable submission
-identities: a repeated request after its previous work terminates can create another run.
+## Uncertain responses
 
-Workers stop trusting ownership at their last locally confirmed lease deadline. A renewal received
-by PostgreSQL but whose reply is held in transit cannot extend that local budget. The handler's
-signal aborts independently of a longer database-operation timeout. On transport recovery, late
-claim responses cannot start expired work and stale renewal/completion tokens cannot regain ownership.
-If completion committed but its response was lost, the runner rejects; a supervised replacement
-observes the terminal record and does not execute that completed job again.
+A rejected operation does not prove rollback: PostgreSQL may have committed while its response was
+lost. pgclear errors propagate without automatic replay. Managed commit uncertainty reports
+`PGCLEAR_COMMIT_UNKNOWN`; cleanup can also produce aggregate errors. Preserve those errors in
+supervision rather than converting them to normal handler failures.
 
-These boundaries have integration tests through a test-only plaintext TCP relay against PostgreSQL:
-held requests, held responses, disconnected sockets, both outcomes of an uncertain COMMIT through
-native and integrated query scopes, stable-ID reconciliation, lease cancellation, stale tokens and lost completion
-responses. A separate healthy connection observes real commit/rollback and lease state. The tests
-add no runtime dependency or public API. They do not simulate TLS negotiation failures, database
-failover or kernel-level packet retransmission; those remain deployment-specific checks.
+For submissions, generate a stable UUID outside the uncertain transaction, retain it, and reconcile
+with `send`/`get`. The original record deduplicates that ID while retained. This reconciles the job,
+not unrelated application writes: those need their own durable business identifier/state check.
+Repeating an unkeyed send or manual retry with a fresh ID can create additional work.
 
-## Claims, budgets and cancellation
+For a transactional handler's uncertain commit, application writes and successful completion are
+both committed, or neither. A replacement worker observes database state. A completion whose reply
+was lost is not replayed merely because its original worker rejected.
 
-Claims select due pending jobs using `FOR UPDATE SKIP LOCKED`, update state with a fresh token and
-insert attempt history in one statement. Each runner rotates the preferred definition after every
-successful claim. Indexed per-definition lookups inspect at most one due candidate per definition,
-then select the first eligible turn. Within each definition, due time and UUID order remain intact.
-Next-due calculation likewise takes only the earliest future candidate per definition. This avoids
-sorting a whole backlog to claim one job and preserves the shared snapshot for claims and timers.
-This is local admission fairness, not preemption or a global weighted scheduler. No claim transaction
-spans a handler; opt-in handler transactions hold application locks. Unknown names
-are left alone. Every outcome and heartbeat checks the current token and live lease. Successful
-completion also checks the execution deadline. These time checks run **after** acquiring the row
-lock: a lock-only wait must not authorize an operation using an earlier time check.
+## Keyed requests and schedules
 
-Heartbeats normally run every third of the lease, bounded by the attempt deadline. Claim and renewal
-round trips count against conservative local budgets using a monotonic clock. A response that has
-spent its budget cannot start a handler or extend locally assumed ownership. A local timer cancels
-work if renewal confirmation is late. Pool waits can consume an attempt without running its handler;
-allow adequate lease time for database latency.
+`request` uses one installed PostgreSQL function to serialize the head and coalesced successor.
+Requests preserve a started head through all automatic retries. A terminal-transition trigger
+releases its successor in the same transaction; rollback restores the relationship. Claims and
+wakeups exclude blocked records. This guarantees trailing work, not one execution per request.
+Concurrent requests follow database serialization order; application force/timing rules are not merged.
 
-Automatic retries share one policy for handler errors and expired claims. Exponential delay is capped
-before optional jitter. `JobError(message, { retry: false })` fails immediately; `retryAt` provides a minimum
-next-attempt time, taking the later of provider timing and policy backoff. Neither extends the budget.
-Error text is capped at 4000 characters, with invalid text replaced, and contains no captured stack
-or payload. Apps must keep secrets out of thrown messages.
+Schedules are durable producers of ordinary jobs. Each maintenance pass locks up to 50 due schedules
+for selected definitions, inserts work, and advances cursors atomically. One catch-up occurrence is
+submitted after downtime; skipped ticks are not replayed. Occurrence uniqueness prevents duplicate
+original submissions, and a unique partial index permits one pending/running job per schedule.
+This arbitration includes manual retries. A conflicting retry raises `JobStateError`; a conflicting
+scheduler insertion is skipped. Removing a schedule leaves its jobs intact.
 
-Recovery locks at most 100 expired claims per maintenance pass, updates their state and history
-atomically, and serializes with completion/renewal. It recovers all definition names. A runner losing
-ownership stops recording outcomes and signals cooperative cancellation. Cancellation cannot stop
-arbitrary JavaScript, blocked event loops, or completed external effects.
+Cron/DST calculation follows cron-parser. No matching runner means no schedule advancement. Register
+unchanged schedules safely at startup; changed cron/zone starts from a new future cursor.
 
-Unfinished handlers retain their local slot after timeout or lost ownership until they settle or
-shutdown spends its grace. Another process can recover and retry their claim. Local concurrency is
-not distributed exclusivity. Execution remains at least once; external effects need app-level
-idempotency or reconciliation even when the queue completion is fenced correctly.
+## Dispatch and notifications
 
-## Discovery and schedules
+Runners rotate between eligible definitions. Indexed lookups preserve oldest-due/UUID ordering
+within each definition and skip locks. Fair admission does not preempt long-running handlers or
+create capacity; reserve slots for short work with definition caps or separate runners.
 
-A transactional trigger emits definition names on pending insertion, state transition or timing change.
-This includes future jobs, allowing runners to adjust their timers. Payloads are never broadcast.
-Generation-counted wakeups retain notifications received between checking storage and going idle.
-The claim and next-due calculation share a snapshot, closing a separate-query timing gap.
+Polling works without another connection. Optional notifications use one dedicated direct or
+session-pooled connection per runner, outside the query pool. A trigger sends definition names,
+never payloads, after transactional pending changes. Future jobs also notify so timers can adjust.
+Wakeup generations and a shared claim/next-due snapshot close check/sleep races.
 
-With notifications, fallback reconciliation defaults to 30 seconds. Without them it defaults to one
-second. Initial listener failures retry each second; pgclear reconnects an established listener.
-Reconnection triggers reconciliation. While a listener is unavailable, fallback is capped at one second
-and a Node warning uses code `PGCLEAR_JOBS_NOTIFICATIONS_UNAVAILABLE`. LISTEN needs a dedicated direct
-or session-pooled connection; a query pool may use transaction pooling.
+Listener startup failure retries, and established listeners reconnect. Failure warns with
+`PGCLEAR_JOBS_NOTIFICATIONS_UNAVAILABLE` and falls back to polling. Reconnection triggers another
+storage check. Polling defaults to one second, or 30 seconds with notifications; while a configured
+listener is unavailable, reconciliation is capped at one second.
 
-Schedules are durable producers, not a second executor. A pass locks at most 50 due schedules for its
-selected names, submits ordinary jobs and advances cursors in one transaction. Occurrence uniqueness
-prevents duplicate original submissions. Explicit manual retries are separate linked attempts at the
-same occurrence. A unique partial index permits only one pending/running job per schedule, so a
-manual retry of an older failure raises `JobStateError` while a later occurrence is outstanding.
-Concurrent scheduler/retry inserts share that arbitration: a losing scheduler skips the occurrence;
-a losing manual retry raises `JobStateError`. Removing a producer leaves its jobs intact.
+## Shutdown and supervision
 
-A schedule submits its saved due occurrence once and advances directly into the future. It never
-walks every missed tick. Overlap suppression counts pending/running work, including automatic and
-manual retries. Catch-up and overlap behavior are fixed; there is no policy matrix to configure.
-Calendar/DST calculation follows cron-parser. Using the saved forward cursor avoids changing an
-occurrence's identity through a reverse lookup around clock changes. No active matching runner means
-no recurring submissions; processing resumes when one starts.
+Call `runJobs` to start. Observe its promise immediately, through an awaited worker entry point or
+an application's existing supervisor. Abort its signal to stop new claiming and maintenance.
+Active work gets `shutdownTimeoutMs` to finish; then handler signals abort and renewals stop.
+The runner closes its listener and waits for driver cleanup. An in-flight claim returned after stop
+is left for recovery. The application pool remains open.
 
-## Shutdown and operations
+Grace expiry bounds waiting for arbitrary handlers, not total wall-clock shutdown. In-flight database
+operations can add their remaining timeout and cleanup time. JavaScript that ignores cancellation
+may outlive the worker promise. Use process supervision/isolation when that matters.
 
-Abort stops new claims and maintenance. An in-flight claim received after stop is left for recovery.
-Active handlers get the shutdown grace to finish; then signals abort and renewal stops. In-flight
-database operations can add their remaining timeout and driver cancellation/cleanup time.
-Uncooperative handlers may outlive the runner's wait;
-process isolation/supervision remains app-owned. A database fault rejects the runner, signals active
-work and leaves unfinished claims for recovery. The application pool stays open; the optional
-runner-owned listener closes.
+Database faults stop the runner, cancel active work, and reject its promise. A supervisor can restart
+it; expired claims recover according to saved policy. Stop and await workers before closing their
+pool. The query-library integration forwards this lifecycle without a second shutdown implementation.
 
-Runners retain completed/cancelled history for seven days, then remove it in batches of at most 100
-using a single database statement-time cutoff and skipping locked rows. Per-definition index scans
-use a completed/cancelled-only index, excluding retained failures, and consider at most 100 expired
-candidates each, then one global batch deletes at most 100. Cleanup
-runs for selected definitions in the existing maintenance loop, checks once a minute, and drains a full batch on the next maintenance
-pass. No outstanding or failed work is expired. Runner `retentionMs` extends this window or disables
-cleanup with `false`; runners sharing definitions should agree on retention. Failed records require
-explicit operator cleanup. `remove` and bounded `prune` also delete attempt history with jobs.
-Deleting a stable-ID job releases its deduplication; retain history longer than the application's
-reconciliation window. Precise keyset cursors survive deleting earlier rows, but pagination is not
-a snapshot across calls. Statistics read current retained records without persistent counters.
-Schema installation, transaction rollback, competing runners, process death, lock waits, delayed
-responses, notifications, reconnects, schedule contention/DST, cleanup, fresh installation, keyed
-follow-ups, automatic retention, backlog fairness, shared-pool contention and transport failures
-have behavioral tests on PostgreSQL.
-Outstanding validation work is tracked only in [todo.md](../todo.md).
+## Retention and resource limits
 
-## Load validation
+Completed/cancelled records expire after seven days by default. Cleanup checks once a minute and
+removes at most 100 records per pass, skipping locks; full batches drain on later maintenance passes.
+A dedicated partial index excludes retained failures from cleanup scans. Cleanup affects only the
+runner's selected definitions. Sharing definitions with different windows lets the shortest window
+remove history. `retentionMs: false` disables automatic cleanup.
 
-Measurements on 1 November 2026 used local PostgreSQL 16.15 and Node 24.4.1, with two runners in
-one Node process, four definitions, and a shared query pool of four or two connections. Each profile
-began with 1,500 ready bulk jobs, 20,000 retained terminal records and 3,000 expired records. Producer
-batches added bulk, quiet, retrying and 200 ms delayed work while two simulated application clients
-used the same pool. The contended profile also held handler/application connections for 8/12 ms.
+Failed and outstanding work is retained. Use bounded `prune` or terminal `remove` for intentional
+cleanup. Attempts are deleted with jobs. Removing history also releases stable-ID deduplication, so
+choose retention longer than the application's reconciliation window. Error messages are sanitized
+and capped at 4000 characters, without stacks or payloads; avoid throwing secrets.
 
-The comparison offered 11 jobs every 50 ms for 10 seconds, then drained outstanding work. Actual
-submission totals differ because shared-pool pressure also applies backpressure to producers.
+Pool waits spend statement and lease budgets. Size the shared pool for actual handler/application
+SQL occupancy plus queue operations; handler concurrency is not a connection count. A small saturated
+pool can cancel an attempt even when the application process remains healthy.
 
-| Measurement                                                | Four connections: before → after | Two connections: before → after |
-| ---------------------------------------------------------- | -------------------------------- | ------------------------------- |
-| Quiet definition p95 start delay                           | 9702 → 18 ms                     | 38069 → 1204 ms                 |
-| Enqueue p95                                                | 34.78 → 18.48 ms                 | 71.22 → 39.37 ms                |
-| Application transaction p95                                | 17.08 → 7.62 ms                  | 52.18 → 40.55 ms                |
-| Completed jobs/second, including initial backlog and drain | 191 → 326                        | 68 → 83                         |
-| Failed jobs / expired attempts                             | 0 / 0 → 0 / 0                    | 0 / 0 → 0 / 0                   |
+## Schema and validation limits
 
-Before the change, claim plans sorted the entire matching ready backlog and automatic cleanup used
-a sequential scan plus a sort over expired matches. Afterward, plans used existing `jobs_pending`
-and `jobs_terminal` indexes with bounded per-definition scans. No new indexes, schema changes,
-claim batches, priorities, queue policies or public options were introduced for these improvements.
-The deterministic regression first failed on the original dispatcher, then passed with rotation.
+Setup explicitly installs one reserved `pgclear_jobs` schema. Workers only check its compatibility;
+producers never perform DDL. A deliberate down migration removes the namespace and its dependants.
+An explicit down/up reset may lose queued jobs and history. See [schema setup](migrations.md).
 
-A separate steady-load run offered 11 jobs every 150 ms for **60 seconds per profile**, followed by
-backlog drain. Each profile completed 5,922 jobs, including the 1,500 initial jobs, with exactly the
-expected retries, zero expired attempts, zero failures, and all 3,000 expired history records removed.
-The quiet definition's p95 start delay was 18.85 ms with four connections and 44.23 ms with two.
-The contended bulk backlog took longer to drain; fair admission does not create processing capacity.
+The test suite covers real PostgreSQL rollback, competing workers, process death, lock waits,
+follow-up promotion, schedule arbitration, retention, and shared-pool pressure. A test-only TCP relay
+exercises delayed/lost requests and responses, uncertain commits, stale tokens, and lost rollback
+responses. Synthetic load profiles exercise backlogs alongside application traffic.
 
-These are single-host synthetic measurements, not a throughput or latency guarantee for applications.
-DB sleep models connection occupancy, not real business work. Network RTT, payload/transaction size,
-worker process layout and concurrent app traffic will change results. Pool peaks are sampled every
-10 ms; plan timings are single `EXPLAIN ANALYZE` observations. This is short sustained validation,
-not evidence of long-term production operation. The [recorded results](load-results.json) retain
-configuration, timings, sampled peaks and plan summaries.
-
-Reproduce against a dedicated database ending in `_test`:
-
-```sh
-npm run test:load
-PGCLEAR_JOBS_LOAD_DURATION_MS=60000 PGCLEAR_JOBS_LOAD_INTERVAL_MS=150 npm run test:load
-```
-
-The default phase is 10 seconds with a 50 ms interval; each batch contains 11 jobs. Set
-`PGCLEAR_JOBS_LOAD_OUTPUT` to save JSON. Setup, drain and cleanup add time beyond the production phase.
-Only the generated load-test definitions are deleted afterward. `npm test` runs smaller behavioral
-regressions for fairness, oldest-due ordering, lock skipping, shared-pool load and total pool exhaustion.
-
-## Before app adoption
-
-Review the current [public API](api.md), not the earlier pending-upsert prototype. Ordinary event
-handlers need domain idempotency; keyed producers need application-owned arbitration for forced
-requests and generated results. Retain stable IDs longer than their reconciliation window.
-Use per-definition limits or separate workers for long/short latency isolation: fair admission does
-not preempt work already occupying every local slot. Pool sizing must cover actual SQL occupancy,
-not just the number of handlers, and runner failure/shutdown must join the app's existing supervision.
-
-A real-app maintenance canary and one-workflow-at-a-time cutover remain the adoption checks. Stop
-old producers/schedulers and drain or explicitly transfer delayed/retrying/active old work before
-both systems can execute the same workflow. App payload compatibility must be considered across
-versions. A severe schema change may use an explicit down/up reset, intentionally losing queued
-work and history. Saved application migration files remain immutable. Database failover,
-TLS/network topology and app effects remain checks for the target deployment.
+Those checks do not establish deployment capacity or validate every application effect, TLS topology,
+database failover, or long-term production behavior. Validate the target application's idempotency,
+cancellation, supervision, and rollout. See [development](development.md) for reproduction commands.

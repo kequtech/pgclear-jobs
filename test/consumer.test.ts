@@ -69,14 +69,21 @@ test('packed core, migration SQL and integration types work with the required pg
     const manifest = JSON.parse(
       await readFile(join(directory, 'node_modules/@kequtech/pgclear-jobs/package.json'), 'utf8'),
     ) as { bin: Record<string, string> };
-    execFileSync(
-      process.execPath,
-      [
-        join(directory, 'node_modules/@kequtech/pgclear-jobs', manifest.bin['pgclear-jobs']!),
-        '--help',
-      ],
-      { stdio: 'pipe' },
-    );
+    if (process.platform === 'win32') {
+      execFileSync(
+        process.execPath,
+        [
+          join(directory, 'node_modules/@kequtech/pgclear-jobs', manifest.bin['pgclear-jobs']!),
+          '--help',
+        ],
+        { stdio: 'pipe' },
+      );
+    } else {
+      // Exercise npm's installed command, including its executable bit and interpreter line.
+      execFileSync(join(directory, 'node_modules/.bin/pgclear-jobs'), ['--help'], {
+        stdio: 'pipe',
+      });
+    }
     await writeFile(
       join(directory, 'consumer.ts'),
       `

@@ -1,3 +1,13 @@
+import { setTimeout as delay } from 'node:timers/promises';
+
+export async function pause(ms: number, signal: AbortSignal): Promise<void> {
+  try {
+    await delay(ms, undefined, { signal });
+  } catch (error) {
+    if (!signal.aborted) throw error;
+  }
+}
+
 /** A generation counter closes the race between checking storage and going idle. */
 export class Wakeup {
   version = 0;

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { defineJob } from '../src/index.js';
-import { serializePayload } from '../src/definition.js';
+import { serializePayload } from '../src/validation.js';
 
 test('definitions are inert, immutable and preserve the handler', () => {
   let called = false;
@@ -70,4 +70,10 @@ test('transactional execution is opt-in and validates the handler and flag', () 
     // @ts-expect-error An invalid handler must fail before execution.
     defineJob({ name: 'invalid', transactional: true, handler: null });
   }, TypeError);
+});
+
+test('misspelled definition options fail before silently changing execution policy', () => {
+  for (const options of [{ maxAttempt: 1 }, { executionTimoutMs: 1000 }, { transaction: true }]) {
+    assert.throws(() => defineJob({ name: 'example', handler() {}, ...options }), TypeError);
+  }
 });

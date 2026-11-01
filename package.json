@@ -35,7 +35,7 @@
   "files": [
     "dist/**/*.js",
     "dist/**/*.d.ts",
-    "docs/",
+    "docs/*.md",
     "todo.md",
     "CHANGELOG.md"
   ],

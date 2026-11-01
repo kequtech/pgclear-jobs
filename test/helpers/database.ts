@@ -28,9 +28,10 @@ export function definition(
   });
 }
 export async function until(check: () => Promise<boolean>, timeout = 5000) {
-  const deadline = Date.now() + timeout;
+  const deadline = performance.now() + timeout;
   while (!(await check())) {
-    if (Date.now() > deadline) throw new Error('Timed out waiting for observable job state.');
+    if (performance.now() > deadline)
+      throw new Error('Timed out waiting for observable job state.');
     await delay(10);
   }
 }

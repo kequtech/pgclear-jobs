@@ -1,14 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { CronExpressionParser } from 'cron-parser';
 import type { Pool } from '@kequtech/pgclear';
-import {
-  databaseText,
-  executionPolicy,
-  integer,
-  serializePayload,
-  validateOptions,
-} from './definition.js';
-import type { JobDefinition } from './definition.js';
+import { databaseText, integer, serializePayload, validateOptions } from './validation.js';
+import { executionPolicy } from './definition.js';
+import type { ExecutionPolicy, JobDefinition } from './definition.js';
 import type { Execute } from './storage.js';
 
 export interface ScheduleOptions {
@@ -22,7 +17,7 @@ export interface Schedule<Payload = unknown> {
   readonly name: string;
   readonly key: string;
   readonly payload: Payload;
-  readonly policy: ReturnType<typeof executionPolicy>;
+  readonly policy: ExecutionPolicy;
   readonly cron: string;
   readonly timeZone: string;
   readonly nextRunAt: Date;
@@ -38,7 +33,7 @@ interface StoredSchedule {
   time_zone: string;
   next_run_at: string;
   last_job_id: string | null;
-  policy: ReturnType<typeof executionPolicy>;
+  policy: ExecutionPolicy;
 }
 
 function expression(options: Pick<ScheduleOptions, 'cron' | 'timeZone'>, from: Date) {

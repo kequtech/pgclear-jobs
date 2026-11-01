@@ -1,55 +1,53 @@
 # Schema setup
 
-Set `DATABASE_URL` in the environment or `.env`, then run:
+After installing `@kequtech/pgclear-jobs` and its pgclear peer, set `DATABASE_URL` in the environment
+or `.env` and run:
 
 ```sh
 npx pgclear-jobs migrate
 ```
 
-For an application npm script, use `"jobs:migrate": "pgclear-jobs migrate"` and run
-`npm run jobs:migrate`. Within this library's checkout, that script builds the command first.
+For an application npm script, use `"jobs:migrate": "pgclear-jobs migrate"`, then
+`npm run jobs:migrate`. Within this library's checkout the script builds the command first.
+The command also accepts explicit `up`. `pgclear-jobs --help` needs no database.
 
-There is one schema definition. Repeated installation preserves existing jobs. Installation is
-atomic and serialized by an advisory transaction lock; neither producers nor workers apply DDL.
-Workers check a small internal compatibility marker before starting.
+There is one schema definition. Repeating installation checks compatibility and preserves existing
+work. Installation is atomic and serialized by an advisory transaction lock. Neither importing the
+package nor running a worker installs storage.
 
-To intentionally remove all Jobs storage:
+## Remove storage
+
+Stop producers and workers, then intentionally remove the namespace:
 
 ```sh
 npx pgclear-jobs migrate down
 ```
 
-Down executes `DROP SCHEMA IF EXISTS pgclear_jobs CASCADE`, removing jobs, attempts, schedules and
-objects depending on that namespace. Stop producers and workers first. A severe breaking schema
-change can be handled with this explicit down/up reset; queued jobs and history will be lost.
-There are no migration ranges, intermediate versions, or automatic destructive upgrades.
+Down executes `DROP SCHEMA IF EXISTS pgclear_jobs CASCADE`. It removes jobs, attempts, schedules,
+history, and objects depending on them. Repeated down is safe. A severe breaking schema change may
+use this explicit down/up reset, with loss of queued jobs accepted by the developer. There are no
+intermediate versions or automatic destructive upgrades. Configuration changes never remove storage.
 
-Programmatic setup is also available:
-
-```ts
-import { migrateJobs } from '@kequtech/pgclear-jobs';
-
-await migrateJobs(pool);
-await migrateJobs(pool, 'down');
-```
-
-`installJobs(pool)` remains a convenience for programmatic installation.
+Programmatic equivalents are `migrateJobs(pool)` and `migrateJobs(pool, 'down')` from the root module.
+`installJobs(pool)` is also a convenience for installation. Each operation uses one transaction.
+Existing incompatible/unversioned namespaces are rejected by up; down can remove them intentionally.
+The old `tenon_jobs` prototype namespace is left alone.
 
 ## Application migration files
-
-Tenon ORM and other migration tools can extract the same SQL without opening a connection:
 
 ```ts
 import { jobsMigration } from '@kequtech/pgclear-jobs/migrations';
 
-// Write jobsMigration.up and jobsMigration.down into the application's migration files.
+// Save jobsMigration.up and jobsMigration.down as application migration files.
 ```
 
-Both strings use the reserved `pgclear_jobs` namespace and include the same advisory lock as the
-command. They contain no outer `BEGIN` or `COMMIT`; the application's migration runner owns that
-transaction. Commit the concrete SQL files so later package updates cannot change historical
-migrations. Tenon needs to copy and apply this pair, without understanding the Jobs tables or SQL.
+These strings use the same canonical statements and advisory lock as standalone setup. They contain
+no outer `BEGIN`/`COMMIT`; the application's migration runner supplies the transaction. Raw up SQL
+is an installation migration, applied once by that runner, rather than a repeatable setup command.
 
-Changing configuration never removes storage. Existing incompatible installations are rejected by
-the up command and workers, leaving the developer to choose when to reset. The old `tenon_jobs`
-prototype namespace is left alone. After an uncertain commit, inspect database state before retrying.
+Commit concrete SQL files. Do not make a historical migration import the newest package or call a
+live installer: dependency updates must not change saved migration behavior. Tenon can copy/apply
+this pair without understanding Jobs tables or execution internals.
+
+Workers check a small internal compatibility marker before starting. They never migrate implicitly.
+After an uncertain commit, inspect database state; an error alone does not prove rollback.
