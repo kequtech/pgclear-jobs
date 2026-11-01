@@ -1,7 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { CronExpressionParser } from 'cron-parser';
 import type { Pool } from '@kequtech/pgclear';
-import { databaseText, executionPolicy, integer, serializePayload } from './definition.js';
+import {
+  databaseText,
+  executionPolicy,
+  integer,
+  serializePayload,
+  validateOptions,
+} from './definition.js';
 import type { JobDefinition } from './definition.js';
 import type { Execute } from './storage.js';
 
@@ -9,8 +15,6 @@ export interface ScheduleOptions {
   readonly cron: string;
   readonly timeZone?: string;
   readonly key?: string;
-  readonly missed?: 'once' | 'skip';
-  readonly overlap?: 'skip' | 'allow';
 }
 
 export interface Schedule<Payload = unknown> {
@@ -21,8 +25,6 @@ export interface Schedule<Payload = unknown> {
   readonly policy: ReturnType<typeof executionPolicy>;
   readonly cron: string;
   readonly timeZone: string;
-  readonly missed: 'once' | 'skip';
-  readonly overlap: 'skip' | 'allow';
   readonly nextRunAt: Date;
   readonly lastJobId: string | null;
 }
@@ -34,8 +36,6 @@ interface StoredSchedule {
   payload: unknown;
   cron: string;
   time_zone: string;
-  missed: 'once' | 'skip';
-  overlap: 'skip' | 'allow';
   next_run_at: string;
   last_job_id: string | null;
   policy: ReturnType<typeof executionPolicy>;
@@ -76,8 +76,6 @@ function record<Payload>(row: StoredSchedule): Schedule<Payload> {
     policy: executionPolicy(row.policy),
     cron: row.cron,
     timeZone: row.time_zone,
-    missed: row.missed,
-    overlap: row.overlap,
     nextRunAt: new Date(row.next_run_at),
     lastJobId: row.last_job_id,
   };
@@ -89,23 +87,20 @@ export async function saveSchedule<Payload>(
   payload: NoInfer<Payload>,
   options: ScheduleOptions,
 ): Promise<Schedule<Payload>> {
+  validateOptions(options, ['cron', 'timeZone', 'key']);
   // Validate before SQL, then calculate against the database clock rather than the producer's clock.
   previewSchedule(options, { count: 1 });
   const key = databaseText(options.key ?? '', 'Schedule key', 500);
-  const missed = options.missed ?? 'once',
-    overlap = options.overlap ?? 'skip';
-  if (!['once', 'skip'].includes(missed) || !['skip', 'allow'].includes(overlap))
-    throw new TypeError('Invalid schedule policy.');
   const data = serializePayload(payload);
   const clock = await execute<{ now: string }>('SELECT to_jsonb(clock_timestamp()) AS now');
   const next = previewSchedule(options, { from: new Date(clock.rows[0]!.now), count: 1 })[0]!;
   const { rows } = await execute<{ record: StoredSchedule }>(
-    `INSERT INTO tenon_jobs.schedules AS s (id, name, key, payload, policy, cron, time_zone, missed, overlap, next_run_at)
-     VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8, $9, $10::timestamptz)
+    `INSERT INTO tenon_jobs.schedules AS s (id, name, key, payload, policy, cron, time_zone, next_run_at)
+     VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8::timestamptz)
      ON CONFLICT (name, key) DO UPDATE SET payload = excluded.payload, policy = excluded.policy,
        next_run_at = CASE WHEN (s.cron, s.time_zone) IS DISTINCT FROM (excluded.cron, excluded.time_zone)
          THEN excluded.next_run_at ELSE s.next_run_at END,
-       cron = excluded.cron, time_zone = excluded.time_zone, missed = excluded.missed, overlap = excluded.overlap
+       cron = excluded.cron, time_zone = excluded.time_zone
      RETURNING to_jsonb(s) AS record`,
     [
       randomUUID(),
@@ -115,8 +110,6 @@ export async function saveSchedule<Payload>(
       JSON.stringify(executionPolicy(definition)),
       options.cron.trim().replace(/\s+/g, ' '),
       options.timeZone ?? 'UTC',
-      missed,
-      overlap,
       next.toISOString(),
     ],
   );
@@ -162,27 +155,23 @@ export async function advanceSchedules(
         const options = { cron: schedule.cron, timeZone: schedule.time_zone };
         const occurred = new Date(schedule.next_run_at);
         const next = previewSchedule(options, { from: clock, count: 1 })[0]!;
-        let jobId: string | null = null;
-        if (schedule.missed === 'once' || clock.getTime() - occurred.getTime() < 60_000) {
-          const inserted = await tx.queryClassic<{ id: string }>(
-            `INSERT INTO tenon_jobs.jobs (id, name, payload, policy, schedule_id, scheduled_for)
+        const inserted = await tx.queryClassic<{ id: string }>(
+          `INSERT INTO tenon_jobs.jobs (id, name, payload, policy, schedule_id, scheduled_for)
            SELECT $1::uuid, $2, $3::jsonb, $4::jsonb, $5::uuid, $6::timestamptz
-           WHERE $7::boolean OR NOT EXISTS (SELECT FROM tenon_jobs.jobs
+           WHERE NOT EXISTS (SELECT FROM tenon_jobs.jobs
              WHERE schedule_id = $5::uuid AND state IN ('pending', 'running'))
            ON CONFLICT (schedule_id, scheduled_for) WHERE retry_of IS NULL DO NOTHING RETURNING id`,
-            [
-              randomUUID(),
-              schedule.name,
-              JSON.stringify(schedule.payload),
-              JSON.stringify(executionPolicy(schedule.policy)),
-              schedule.id,
-              occurred.toISOString(),
-              schedule.overlap === 'allow',
-            ],
-          );
-          jobId = inserted.rows[0]?.id ?? null;
-          if (jobId) created++;
-        }
+          [
+            randomUUID(),
+            schedule.name,
+            JSON.stringify(schedule.payload),
+            JSON.stringify(executionPolicy(schedule.policy)),
+            schedule.id,
+            occurred.toISOString(),
+          ],
+        );
+        const jobId = inserted.rows[0]?.id ?? null;
+        if (jobId) created++;
         await tx.queryClassic(
           `UPDATE tenon_jobs.schedules SET next_run_at = $2::timestamptz,
         last_job_id = COALESCE($3::uuid, last_job_id) WHERE id = $1::uuid`,

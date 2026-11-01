@@ -20,9 +20,9 @@ async function claimJob(execute: Execute, names: readonly string[], leaseMs: num
 test('installation is repeatable and safe across concurrent installers', async () => {
   await Promise.all([installJobs(pool), installJobs(pool), installJobs(pool)]);
   const result = await pool.queryClassic<{ count: string }>(
-    'SELECT count(*)::text AS count FROM tenon_jobs.migrations',
+    'SELECT count(*)::text AS count FROM tenon_jobs.schema_version',
   );
-  assert.equal(result.rows[0]?.count, '4');
+  assert.equal(result.rows[0]?.count, '1');
 });
 
 test('pgclear scope insertion commits or rolls back with application data', async () => {
@@ -70,23 +70,26 @@ test('Tenon integration joins its transaction and expires with its scope', async
   }
 });
 
-test('key collisions return unchanged outstanding work and terminal records release keys', async () => {
+test('events remain independent while keyed requests keep the latest pending payload', async () => {
   const def = definition();
   const runAt = new Date(Date.now() + 60_000);
-  const initial = await jobs(pool).send(def, 1, { key: 'same', runAt });
+  const initial = await jobs(pool).request(def, 1, { key: 'same', runAt });
   const submissions = await Promise.all(
-    Array.from({ length: 20 }, () => jobs(pool).send(def, 2, { key: 'same' })),
+    Array.from({ length: 20 }, () => jobs(pool).request(def, 2, { key: 'same' })),
   );
   assert.ok(
     submissions.every(
       (job) =>
-        job.id === initial.id && job.payload === 1 && job.runAt.getTime() === runAt.getTime(),
+        job.id === initial.id && job.payload === 2 && job.runAt.getTime() === runAt.getTime(),
     ),
   );
-  assert.equal((await jobs(pool).find(def, { key: 'same' })).length, 1);
   await jobs(pool).cancel(initial.id);
-  assert.notEqual((await jobs(pool).send(def, 3, { key: 'same' })).id, initial.id);
-  assert.notEqual((await jobs(pool).send(def, 4)).id, (await jobs(pool).send(def, 4)).id);
+  assert.notEqual((await jobs(pool).request(def, 3, { key: 'same' })).id, initial.id);
+  const first = await jobs(pool).send(def, 4);
+  const second = await jobs(pool).send(def, 4);
+  assert.notEqual(first.id, second.id);
+  assert.equal(first.key, null);
+  assert.equal(second.key, null);
 });
 
 test('key contention waits for a committing or rolling-back transaction', async () => {
@@ -94,15 +97,15 @@ test('key contention waits for a committing or rolling-back transaction', async 
   let pending!: Promise<unknown>;
   let committed = '';
   await pool.transaction(async (tx) => {
-    committed = (await jobs(tx).send(def, 1, { key: 'commit' })).id;
-    pending = jobs(pool).send(def, 2, { key: 'commit' });
+    committed = (await jobs(tx).request(def, 1, { key: 'commit' })).id;
+    pending = jobs(pool).request(def, 2, { key: 'commit' });
     await delay(20);
   });
   assert.equal(((await pending) as { id: string }).id, committed);
   await assert.rejects(
     pool.transaction(async (tx) => {
-      await jobs(tx).send(def, 3, { key: 'rollback' });
-      pending = jobs(pool).send(def, 4, { key: 'rollback' });
+      await jobs(tx).request(def, 3, { key: 'rollback' });
+      pending = jobs(pool).request(def, 4, { key: 'rollback' });
       await delay(20);
       throw new Error('rollback');
     }),
@@ -430,39 +433,10 @@ async function listenerPid(applicationName: string): Promise<number | undefined>
 
 const quietRunner = { pollIntervalMs: 30_000, recoveryIntervalMs: 30_000, shutdownTimeoutMs: 20 };
 
-test('upgrading version 1 preserves jobs and installs transactional notifications', async () => {
-  const def = definition();
-  const rollback = new Error('rollback upgrade fixture');
-  await assert.rejects(
-    pool.transaction(async (tx) => {
-      const row = await jobs(tx).send(def, 7);
-      await tx.queryClassic('DROP TABLE tenon_jobs.schedules');
-      await tx.queryClassic('DROP INDEX tenon_jobs.jobs_terminal');
-      await tx.queryClassic(
-        'ALTER TABLE tenon_jobs.jobs DROP COLUMN schedule_id, DROP COLUMN scheduled_for, DROP COLUMN retry_of',
-      );
-      await tx.queryClassic('DROP TRIGGER notify_pending ON tenon_jobs.jobs');
-      await tx.queryClassic('DROP FUNCTION tenon_jobs.notify_pending()');
-      await tx.queryClassic('DELETE FROM tenon_jobs.migrations WHERE version >= 2');
-      await installJobs({ transaction: (work) => tx.savepoint(work) });
-      assert.equal((await jobs(tx).get(row.id))?.payload, 7);
-      const version = await tx.queryClassic<{ version: number }>(
-        'SELECT max(version) AS version FROM tenon_jobs.migrations',
-      );
-      assert.equal(version.rows[0]?.version, 4);
-      const trigger = await tx.queryClassic<{ enabled: string }>(
-        "SELECT tgenabled AS enabled FROM pg_trigger WHERE tgrelid = 'tenon_jobs.jobs'::regclass AND tgname = 'notify_pending'",
-      );
-      assert.equal(trigger.rows[0]?.enabled, 'O');
-      throw rollback;
-    }),
-    (error) => error === rollback,
-  );
-});
-
 test('notifications commit with pgclear and Tenon operations and ignore keyed no-op updates', async () => {
   const def = definition();
   const received: string[] = [];
+  const id = randomUUID();
   const listener = await listen(url!, {
     channels: [notificationChannel],
     onNotification: ({ payload }) => {
@@ -481,12 +455,12 @@ test('notifications commit with pgclear and Tenon operations and ignore keyed no
       /rollback/,
     );
     await db.transaction(async (tx) => {
-      await tenonJobs(tx).send(def, 2, { key: 'commit' });
+      await tenonJobs(tx).send(def, 2, { id });
       await delay(30);
       assert.equal(received.length, 0);
     });
     await until(async () => received.length === 1);
-    await jobs(pool).send(def, 3, { key: 'commit' });
+    await jobs(pool).send(def, 3, { id });
     await delay(30);
     assert.equal(received.length, 1);
     const row = (await jobs(pool).find(def))[0]!;
@@ -586,37 +560,6 @@ test('a borrowed pool runner wakes on committed work with a long polling interva
   }
   assert.equal(await listenerPid(def.name), undefined);
   await pool.queryClassic('SELECT 1');
-});
-
-test('connection settings create a runner-owned pool and listener and close both', async () => {
-  let handled = 0;
-  const def = definition({
-    handler() {
-      handled++;
-    },
-  });
-  const stop = new AbortController();
-  const running = runJobs(
-    { connectionString: url!, applicationName: def.name, maxConnections: 2 },
-    [def],
-    {
-      ...quietRunner,
-      signal: stop.signal,
-    },
-  );
-  try {
-    await until(async () => Boolean(await listenerPid(def.name)));
-    await jobs(pool).send(def, 1);
-    await until(async () => handled === 1, 2000);
-  } finally {
-    stop.abort();
-    await running;
-  }
-  const result = await pool.queryClassic<{ count: string }>(
-    'SELECT count(*)::text AS count FROM pg_stat_activity WHERE application_name = $1',
-    [def.name],
-  );
-  assert.equal(result.rows[0]?.count, '0');
 });
 
 test('future work, retries and earlier reschedules wake without waiting for fallback polling', async () => {

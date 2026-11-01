@@ -16,7 +16,13 @@ export const names: string[] = [];
 export function definition(options: Partial<Parameters<typeof defineJob<number>>[0]> = {}) {
   const name = `test-${randomUUID()}`;
   names.push(name);
-  return defineJob({ name, retryDelayMs: 0, handler(_payload: number) {}, ...options });
+  return defineJob({
+    name,
+    retryDelayMs: 0,
+    retryJitter: false,
+    handler(_payload: number) {},
+    ...options,
+  });
 }
 export async function until(check: () => Promise<boolean>, timeout = 5000) {
   const deadline = Date.now() + timeout;

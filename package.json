@@ -38,6 +38,7 @@
     "test:compile": "node scripts/build.mjs --test",
     "test:unit": "npm run build && npm run test:compile && node --test .test-dist/test/*.test.js",
     "test:integration": "npm run test:compile && node --env-file-if-exists=.env --test --test-concurrency=1 .test-dist/test/integration/*.test.js",
+    "test:load": "npm run test:compile && node --env-file-if-exists=.env .test-dist/test/load/queue-load.js",
     "test": "npm run test:unit && npm run test:integration",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

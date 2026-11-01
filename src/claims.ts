@@ -7,13 +7,13 @@ export interface Claim extends StoredJob {
   deadline: string;
 }
 
-// Shared by handler failures and abandoned-claim recovery. Older rows retain their defaults.
+// Shared by handler failures and abandoned-claim recovery.
 const remainingAttempts = "j.attempt_count < (j.policy->>'maxAttempts')::integer";
-const retryDelay = `LEAST(COALESCE((j.policy->>'retryMaxDelayMs')::double precision, 86400000),
+const retryDelay = `LEAST((j.policy->>'retryMaxDelayMs')::double precision,
   (j.policy->>'retryDelayMs')::double precision *
   CASE WHEN j.policy->>'retryBackoff' = 'exponential'
     THEN power(2::double precision, LEAST(j.attempt_count - 1, 31)) ELSE 1 END) *
-  CASE WHEN COALESCE((j.policy->>'retryJitter')::boolean, false) THEN 0.5 + random() / 2 ELSE 1 END`;
+  CASE WHEN (j.policy->>'retryJitter')::boolean THEN 0.5 + random() / 2 ELSE 1 END`;
 const retryTime = `clock_timestamp() + ${retryDelay} * interval '1 millisecond'`;
 
 function outcomeUpdate(success: string, retry: string, message: string, runAt = retryTime): string {
@@ -31,11 +31,14 @@ export async function claimJob(
   leaseMs: number,
 ): Promise<{ claim: Claim | null; delayMs: number | null }> {
   const { rows } = await execute<{ record: Claim | null; delay_ms: number | null }>(
-    `WITH candidate AS (
-      SELECT id FROM tenon_jobs.jobs
-      WHERE state = 'pending' AND run_at <= statement_timestamp()
-        AND name IN (SELECT jsonb_array_elements_text($1::jsonb))
-      ORDER BY run_at, id LIMIT 1 FOR UPDATE SKIP LOCKED
+    `WITH selected AS (
+      SELECT name, position FROM jsonb_array_elements_text($1::jsonb) WITH ORDINALITY AS d(name, position)
+    ), candidate AS (
+      SELECT due.id FROM selected d CROSS JOIN LATERAL (
+        SELECT id FROM tenon_jobs.jobs WHERE name = d.name
+          AND state = 'pending' AND blocked_by IS NULL AND run_at <= statement_timestamp()
+        ORDER BY run_at, id LIMIT 1 FOR UPDATE SKIP LOCKED
+      ) due ORDER BY d.position LIMIT 1
     ), claimed AS (
       UPDATE tenon_jobs.jobs j SET state = 'running', claim_token = $2::uuid,
         attempt_count = attempt_count + 1, updated_at = clock_timestamp(),
@@ -49,8 +52,11 @@ export async function claimJob(
     ) SELECT (SELECT to_jsonb(c) FROM claimed c) AS record,
       CASE WHEN EXISTS (SELECT FROM claimed) THEN NULL ELSE (
         SELECT ceil(extract(epoch FROM (min(run_at) - clock_timestamp())) * 1000)::double precision
-        FROM tenon_jobs.jobs WHERE state = 'pending' AND run_at > statement_timestamp()
-          AND name IN (SELECT jsonb_array_elements_text($1::jsonb))
+        FROM selected d CROSS JOIN LATERAL (
+          SELECT run_at FROM tenon_jobs.jobs WHERE name = d.name
+            AND state = 'pending' AND blocked_by IS NULL AND run_at > statement_timestamp()
+          ORDER BY run_at, id LIMIT 1
+        ) future
       ) END AS delay_ms`,
     [JSON.stringify(names), randomUUID(), leaseMs],
   );

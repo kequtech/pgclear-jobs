@@ -70,7 +70,17 @@ test('packed core and declarations work without the optional Tenon peer', async 
       const record = await jobs(pool).send(definition, { id: 'example' });
       const id: string = record.payload.id;
       const batch = await jobs(pool).sendMany(definition, [{ payload: { id: 'batch' } }]);
-      const updated = await jobs(pool).upsert(definition, { id: 'latest' }, { key: 'one' });
+      const updated = await jobs(pool).update(definition, record.id, { id: 'latest' });
+      const requested = await jobs(pool).request(definition, { id: 'follow-up' }, { key: 'one' });
+      const requestedId: string = requested.payload.id;
+      const blockedBy: string | null = requested.blockedBy;
+      void requestedId;
+      void blockedBy;
+      // @ts-expect-error Requests preserve shipped definition types.
+      await jobs(pool).request(definition, { id: false }, { key: 'one' });
+      // @ts-expect-error Events have stable IDs; keyed work uses request.
+      await jobs(pool).send(definition, { id: 'event' }, { key: 'one' });
+      void runJobs(pool, [definition], { retentionMs: false });
       const cursor: string = updated.cursor;
       const retryOf: string | null = updated.retryOf;
       await jobs(pool).find(definition, { after: cursor });

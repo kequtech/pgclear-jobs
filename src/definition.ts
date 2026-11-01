@@ -47,6 +47,13 @@ export function databaseText(value: unknown, name: string, max = Infinity): stri
   return value;
 }
 
+/** Reject removed or misspelled options rather than silently changing submission behavior. */
+export function validateOptions(options: object, allowed: readonly string[]): void {
+  for (const key of Object.keys(options)) {
+    if (!allowed.includes(key)) throw new TypeError(`Unknown option: ${key}.`);
+  }
+}
+
 export function uuid(value: unknown): string {
   if (typeof value !== 'string' || !/^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/i.test(value))
     throw new TypeError('Job ID must be a UUID.');
@@ -68,25 +75,25 @@ export function defineJob<Payload>(options: JobOptions<Payload>): JobDefinition<
   });
 }
 
-/** Select only persisted execution policy; also supplies defaults for older records. */
+/** Select only persisted execution policy. */
 export function executionPolicy(options: Partial<ExecutionPolicy>): ExecutionPolicy {
   const retryBackoff = options.retryBackoff ?? 'exponential';
   if (retryBackoff !== 'fixed' && retryBackoff !== 'exponential') {
     throw new TypeError('retryBackoff must be fixed or exponential.');
   }
-  if (typeof (options.retryJitter ?? false) !== 'boolean')
+  if (typeof (options.retryJitter ?? true) !== 'boolean')
     throw new TypeError('retryJitter must be boolean.');
   return {
     maxAttempts: integer(options.maxAttempts ?? 3, 'maxAttempts', 1, 1000),
     retryDelayMs: integer(options.retryDelayMs ?? 1000, 'retryDelayMs', 0, 86_400_000),
     retryBackoff,
     retryMaxDelayMs: integer(options.retryMaxDelayMs ?? 86_400_000, 'retryMaxDelayMs', 0),
-    retryJitter: options.retryJitter ?? false,
+    retryJitter: options.retryJitter ?? true,
     executionTimeoutMs: integer(options.executionTimeoutMs ?? 300_000, 'executionTimeoutMs'),
   };
 }
 
-/** Reject lossy JSON conversion, including Dates, sparse arrays and undefined fields. */
+/** JSON payloads omit absent object fields and reject lossy values such as Dates and sparse arrays. */
 export function serializePayload(value: unknown): string {
   const ancestors = new Set<object>();
   function visit(item: unknown): unknown {
@@ -123,7 +130,7 @@ export function serializePayload(value: unknown): string {
         databaseText(key, 'Payload key');
         const descriptor = Object.getOwnPropertyDescriptor(item, key)!;
         if (!('value' in descriptor)) throw new TypeError('Payload cannot contain accessors.');
-        object[key] = visit(descriptor.value);
+        if (descriptor.value !== undefined) object[key] = visit(descriptor.value);
       }
       snapshot = object;
     }

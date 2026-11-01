@@ -3,6 +3,9 @@ import type { QueryClient } from '@kequtech/tenon-orm';
 import type { InputValue } from '@kequtech/pgclear';
 import { JobRecords } from './records.js';
 
+// One entry point for Tenon consumers; the local jobs export supplies the adapted scope.
+export * from './index.js';
+
 /** Every statement goes through the supplied Tenon database or transaction. */
 export function jobs(scope: QueryClient): JobRecords {
   async function execute<Row extends object>(

@@ -2,11 +2,11 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
 import { createTenon } from '@kequtech/tenon-orm';
-import { defineJob, installJobs, jobs, JobNotFoundError, JobStateError } from '../../src/index.js';
+import { defineJob, jobs, JobNotFoundError, JobStateError } from '../../src/index.js';
 import { jobs as tenonJobs } from '../../src/tenon.js';
 import { claimJob, finishClaim } from '../../src/claims.js';
 import { advanceSchedules } from '../../src/schedules.js';
-import { definition, execute, names, pool, url } from '../helpers/database.js';
+import { definition, execute, pool, url } from '../helpers/database.js';
 
 test('stable submission IDs preserve the first job across completion and concurrent retries', async () => {
   const def = definition();
@@ -32,7 +32,7 @@ test('stable submission IDs preserve the first job across completion and concurr
   assert.equal(recreated.payload, 99);
 });
 
-test('bulk submission skips duplicate IDs and keys and preserves null JSON payloads', async () => {
+test('bulk submission skips duplicate IDs and preserves null JSON payloads', async () => {
   const def = defineJob({ name: definition().name, handler(_payload: unknown) {} });
   const id = randomUUID();
   const repeated = randomUUID();
@@ -42,11 +42,11 @@ test('bulk submission skips duplicate IDs and keys and preserves null JSON paylo
     { id: randomUUID(), payload: null },
     { id: repeated, payload: 'first' },
     { id: repeated, payload: 'second' },
-    { key: 'one', payload: { value: 2 } },
-    { key: 'one', payload: { value: 3 } },
+    { payload: { value: 2 } },
+    { payload: { value: 2 } },
     { payload: false, delayMs: 60000 },
   ]);
-  assert.equal(inserted.length, 4);
+  assert.equal(inserted.length, 5);
   assert.ok(inserted.some((job) => job.payload === null));
   assert.equal((await jobs(pool).get(existing.id))?.payload, 1);
   const delayed = inserted.find((job) => job.payload === false)!;
@@ -58,7 +58,7 @@ test('bulk submission skips duplicate IDs and keys and preserves null JSON paylo
       TypeError,
     );
     await assert.rejects(jobs(tx).sendMany(def, new Array<{ payload: unknown }>(1)), TypeError);
-    assert.equal((await jobs(tx).find(def)).length, 5);
+    assert.equal((await jobs(tx).find(def)).length, 6);
     await assert.rejects(
       jobs(tx).sendMany(
         def,
@@ -70,7 +70,7 @@ test('bulk submission skips duplicate IDs and keys and preserves null JSON paylo
   });
 });
 
-test('batch submission and pending upserts join the supplied Tenon transaction', async () => {
+test('batch submission and keyed requests join the supplied Tenon transaction', async () => {
   const def = definition();
   const db = createTenon({ connection: url });
   try {
@@ -78,8 +78,8 @@ test('batch submission and pending upserts join the supplied Tenon transaction',
       db.transaction(async (tx) => {
         const scope = tenonJobs(tx);
         await scope.sendMany(def, [{ payload: 1 }, { payload: 2 }]);
-        await scope.upsert(def, 3, { key: 'pending' });
-        await scope.upsert(def, 4, { key: 'pending', delayMs: 1000 });
+        await scope.request(def, 3, { key: 'pending' });
+        await scope.request(def, 4, { key: 'pending', delayMs: 1000 });
         assert.equal((await scope.stats(def)).pending, 3);
         assert.equal((await jobs(pool).find(def)).length, 0);
         throw new Error('rollback');
@@ -94,42 +94,25 @@ test('batch submission and pending upserts join the supplied Tenon transaction',
   }
 });
 
-test('pending upserts coalesce concurrent submissions and preserve the saved policy and attempt count', async () => {
+test('explicit pending edits preserve a retry job policy, budget and history', async () => {
   const def = definition({ maxAttempts: 3 });
-  const submitted = await Promise.all(
-    Array.from({ length: 8 }, (_, payload) => jobs(pool).upsert(def, payload, { key: 'one' })),
-  );
-  assert.equal(new Set(submitted.map((job) => job.id)).size, 1);
-  const first = submitted[0]!;
+  const first = await jobs(pool).send(def, 1);
   await finishClaim(execute, (await claimJob(execute, [def.name], 30000)).claim!, 'temporary');
   const changed = defineJob({ ...def, maxAttempts: 8 });
-  const updated = await jobs(pool).upsert(changed, 99, { key: 'one', delayMs: 60000 });
+  const updated = await jobs(pool).update(changed, first.id, 99);
   assert.equal(updated.id, first.id);
   assert.equal(updated.payload, 99);
   assert.equal(updated.attempts, 1);
   assert.equal(updated.policy.maxAttempts, 3);
-  assert.ok(updated.runAt.getTime() > Date.now() + 59000);
-  const payloadOnly = await jobs(pool).upsert(def, 100, { key: 'one' });
-  assert.equal(payloadOnly.runAt.getTime(), updated.runAt.getTime());
-  assert.equal((await jobs(pool).send(def, 101, { key: 'one' })).payload, 100);
-});
-
-test('an upsert racing an active claim reports a usable application conflict', async () => {
-  const def = definition();
-  const original = await jobs(pool).send(def, 1, { key: 'one' });
-  const claim = (await claimJob(execute, [def.name], 30000)).claim!;
-  await pool.transaction(async (tx) => {
-    await assert.rejects(jobs(tx).upsert(def, 2, { key: 'one' }), JobStateError);
-    await tx.queryClassic('SELECT 1');
-  });
-  assert.equal((await jobs(pool).get(original.id))?.payload, 1);
-  await finishClaim(execute, claim, null);
-  assert.notEqual((await jobs(pool).upsert(def, 3, { key: 'one' })).id, original.id);
+  const later = new Date(Date.now() + 60_000);
+  const rescheduled = await jobs(pool).reschedule(first.id, later);
+  assert.equal(rescheduled.runAt.getTime(), later.getTime());
+  assert.equal((await jobs(pool).attempts(first.id)).length, 1);
 });
 
 test('manual retry preserves failed history and returns a fresh linked job and budget', async () => {
   const def = definition({ maxAttempts: 2 });
-  const failed = await jobs(pool).send(def, 42, { key: 'one' });
+  const failed = await jobs(pool).request(def, 42, { key: 'one' });
   for (let n = 0; n < 2; n++) {
     await finishClaim(execute, (await claimJob(execute, [def.name], 30000)).claim!, 'failed');
   }
@@ -278,6 +261,7 @@ test('stats distinguish ready, delayed, active and terminal work from a single s
     cancelled: 0,
     ready: 0,
     delayed: 0,
+    blocked: 0,
     total: 0,
   };
   assert.deepEqual(await jobs(pool).stats(def), zero);
@@ -298,33 +282,7 @@ test('stats distinguish ready, delayed, active and terminal work from a single s
     cancelled: 1,
     ready: 1,
     delayed: 1,
+    blocked: 0,
     total: 6,
   });
-});
-
-test('upgrading version 3 preserves existing jobs, schedules and saved policy', async () => {
-  const def = definition();
-  await assert.rejects(
-    pool.transaction(async (tx) => {
-      const job = await jobs(tx).send(def, 42);
-      const schedule = await jobs(tx).schedule(def, 43, { cron: '0 * * * *' });
-      // Earlier tests created v4-only occurrence retries; they cannot exist in a v3 fixture.
-      await tx.queryClassic(
-        'DELETE FROM tenon_jobs.jobs WHERE retry_of IS NOT NULL AND name IN (SELECT jsonb_array_elements_text($1::jsonb))',
-        [JSON.stringify(names)],
-      );
-      await tx.queryClassic('DROP INDEX tenon_jobs.jobs_terminal');
-      await tx.queryClassic('DROP INDEX tenon_jobs.jobs_schedule_occurrence');
-      await tx.queryClassic('ALTER TABLE tenon_jobs.jobs DROP COLUMN retry_of');
-      await tx.queryClassic(
-        'CREATE UNIQUE INDEX jobs_schedule_occurrence ON tenon_jobs.jobs (schedule_id, scheduled_for)',
-      );
-      await tx.queryClassic('DELETE FROM tenon_jobs.migrations WHERE version = 4');
-      await installJobs({ transaction: (work) => tx.savepoint(work) });
-      assert.deepEqual(await jobs(tx).get(job.id), job);
-      assert.deepEqual((await jobs(tx).schedules(def))[0], schedule);
-      throw new Error('rollback upgrade fixture');
-    }),
-    /rollback upgrade fixture/,
-  );
 });

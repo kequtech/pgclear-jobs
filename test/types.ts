@@ -34,11 +34,22 @@ async function types(tx: QueryClient) {
   void batchId;
   // @ts-expect-error A batch cannot widen the definition's payload.
   await jobs(pool).sendMany(a, [{ payload: { id: 1 } }]);
+  // @ts-expect-error Keyed work uses request, not another update-or-insert contract.
   await jobs(pool).upsert(a, { id: '1' }, { key: 'one' });
-  // @ts-expect-error Upserts require an outstanding key.
-  await jobs(pool).upsert(a, { id: '1' }, {});
-  // @ts-expect-error Upserts preserve the definition's input type.
-  await jobs(pool).upsert(a, { id: false }, { key: 'one' });
+  // @ts-expect-error Bulk events do not coalesce by key.
+  await jobs(pool).sendMany(a, [{ payload: { id: '1' }, key: 'one' }]);
+  const requested = await jobs(pool).request(a, { id: 'latest' }, { key: 'one' });
+  const requestedId: string = requested.payload.id;
+  const blocker: string | null = requested.blockedBy;
+  void requestedId;
+  void blocker;
+  await tenonJobs(tx).request(a, { id: 'latest' }, { key: 'one', delayMs: 100 });
+  // @ts-expect-error Requests require a key.
+  await jobs(pool).request(a, { id: 'latest' }, {});
+  // @ts-expect-error Requests cannot widen the definition's payload.
+  await jobs(pool).request(a, { id: 1 }, { key: 'one' });
+  // @ts-expect-error Request identity is assigned by the queue, not a stable submission ID.
+  await jobs(pool).request(a, { id: 'latest' }, { key: 'one', id: 'id' });
   await jobs(pool).find(a, { after: job.cursor });
   // @ts-expect-error Cleanup only accepts terminal states.
   await jobs(pool).prune(a, { before: new Date(), states: ['running'] });
@@ -47,10 +58,18 @@ async function types(tx: QueryClient) {
   void scheduledId;
   // @ts-expect-error Scheduling preserves the definition's payload contract.
   await jobs(pool).schedule(a, { id: 1 }, { cron: '* * * * *' });
+  // @ts-expect-error Schedules have one catch-up/overlap contract.
+  await jobs(pool).schedule(a, { id: '1' }, { cron: '* * * * *', missed: 'skip' });
+  // @ts-expect-error Overlap is prevented by default, not a queue policy to select.
+  await jobs(pool).schedule(a, { id: '1' }, { cron: '* * * * *', overlap: 'allow' });
   await tenonJobs(tx).schedule(a, { id: '1' }, { cron: '* * * * *' });
   await runJobs(pool, [a, b]);
+  // @ts-expect-error The application owns one pool for queue operations and execution.
   await runJobs('postgresql://localhost/example', [a, b]);
+  // @ts-expect-error Pool creation is explicit.
   await runJobs({ connectionString: 'postgresql://localhost/example', maxConnections: 2 }, [a]);
+  await runJobs(pool, [a], { retentionMs: false });
+  await runJobs(pool, [a], { retentionMs: 30 * 86_400_000 });
   await runJobs(pool, [a], { notifications: 'postgresql://localhost/example' });
 }
 void types;

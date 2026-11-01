@@ -1,6 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import type { Executor, InputValue } from '@kequtech/pgclear';
-import { databaseText, executionPolicy, integer, serializePayload, uuid } from './definition.js';
+import {
+  databaseText,
+  executionPolicy,
+  integer,
+  serializePayload,
+  uuid,
+  validateOptions,
+} from './definition.js';
 import type { JobDefinition } from './definition.js';
 import { JobNotFoundError, JobStateError } from './errors.js';
 import { jobRecord, readCursor, states } from './storage.js';
@@ -13,10 +20,10 @@ export interface TimingOptions {
   readonly delayMs?: number;
 }
 
-/** Stable submission identity and outstanding-work coalescing are separate contracts. */
-export type SendOptions = TimingOptions &
-  ({ readonly id?: string; readonly key?: never } | { readonly id?: never; readonly key?: string });
-export interface UpsertOptions extends TimingOptions {
+export interface SendOptions extends TimingOptions {
+  readonly id?: string;
+}
+export interface RequestOptions extends TimingOptions {
   readonly key: string;
 }
 export type Submission<Payload> = SendOptions & { readonly payload: Payload };
@@ -30,6 +37,7 @@ export interface JobStats extends Readonly<Record<JobState, number>> {
   readonly total: number;
   readonly ready: number;
   readonly delayed: number;
+  readonly blocked: number;
 }
 
 export interface FindOptions {
@@ -54,20 +62,21 @@ function timestamp(date: Date): string {
   return date.toISOString();
 }
 
-function submission(
-  payload: unknown,
-  options: { readonly id?: string; readonly key?: string } & TimingOptions,
-) {
-  if (options.id !== undefined && options.key !== undefined)
-    throw new TypeError('Use a stable id or an outstanding-work key, not both.');
+function submission(payload: unknown, options: TimingOptions) {
   if (options.runAt !== undefined && options.delayMs !== undefined)
     throw new TypeError('Use runAt or delayMs, not both.');
   return {
-    id: options.id === undefined ? randomUUID() : uuid(options.id),
     payload: serializePayload(payload),
-    key: options.key === undefined ? null : databaseText(options.key, 'key', 500),
     run_at: options.runAt === undefined ? null : timestamp(options.runAt),
     delay_ms: integer(options.delayMs ?? 0, 'delayMs', 0),
+  };
+}
+
+function sendInput(payload: unknown, options: SendOptions) {
+  validateOptions(options, ['id', 'runAt', 'delayMs']);
+  return {
+    ...submission(payload, options),
+    id: options.id === undefined ? randomUUID() : uuid(options.id),
   };
 }
 
@@ -100,61 +109,55 @@ export class JobRecords {
     );
   }
 
-  send<Payload>(
+  async send<Payload>(
     definition: JobDefinition<Payload>,
     payload: NoInfer<Payload>,
     options: SendOptions = {},
   ): Promise<Job<Payload>> {
-    return this.submit(definition, payload, options, false);
-  }
-
-  async upsert<Payload>(
-    definition: JobDefinition<Payload>,
-    payload: NoInfer<Payload>,
-    options: UpsertOptions,
-  ): Promise<Job<Payload>> {
-    databaseText(options.key, 'key', 500);
-    const job = await this.submit(definition, payload, options, true);
-    if (job.state !== 'pending') throw new JobStateError(job.id);
-    return job;
-  }
-
-  private async submit<Payload>(
-    definition: JobDefinition<Payload>,
-    payload: Payload,
-    options: SendOptions,
-    replace: boolean,
-  ): Promise<Job<Payload>> {
-    const input = submission(payload, options);
-    const conflict =
-      options.id === undefined
-        ? "(name, key) WHERE key IS NOT NULL AND state IN ('pending', 'running')"
-        : '(id)';
-    const assignment = replace
-      ? `payload = CASE WHEN j.state = 'pending' THEN excluded.payload ELSE j.payload END,
-         run_at = CASE WHEN j.state = 'pending' AND ${options.runAt !== undefined || options.delayMs !== undefined}
-           THEN excluded.run_at ELSE j.run_at END,
-         updated_at = CASE WHEN j.state = 'pending' THEN clock_timestamp() ELSE j.updated_at END`
-      : 'id = j.id';
-    const result = await this.execute<{ record: StoredJob }>(
-      `INSERT INTO tenon_jobs.jobs AS j (id, name, payload, key, run_at, policy)
-       VALUES ($1, $2, $3::jsonb, $4, COALESCE($5::timestamptz,
-         clock_timestamp() + $7::double precision * interval '1 millisecond'), $6::jsonb)
-       ON CONFLICT ${conflict} DO UPDATE SET ${assignment}
-       RETURNING to_jsonb(j) AS record`,
+    const input = sendInput(payload, options);
+    const { rows } = await this.execute<{ record: StoredJob }>(
+      `INSERT INTO tenon_jobs.jobs AS j (id, name, payload, run_at, policy)
+       VALUES ($1, $2, $3::jsonb, COALESCE($4::timestamptz,
+         clock_timestamp() + $5::double precision * interval '1 millisecond'), $6::jsonb)
+       ON CONFLICT (id) DO UPDATE SET id = j.id RETURNING to_jsonb(j) AS record`,
       [
         input.id,
         definition.name,
         input.payload,
-        input.key,
         input.run_at,
-        JSON.stringify(executionPolicy(definition)),
         input.delay_ms,
+        JSON.stringify(executionPolicy(definition)),
       ],
     );
-    const job = jobRecord<Payload>(result.rows[0]!.record);
+    const job = jobRecord<Payload>(rows[0]!.record);
     if (job.name !== definition.name) throw new JobStateError(job.id);
     return job;
+  }
+
+  /** Coalesce unstarted work, or retain one follow-up behind a job and all its retries. */
+  async request<Payload>(
+    definition: JobDefinition<Payload>,
+    payload: NoInfer<Payload>,
+    options: RequestOptions,
+  ): Promise<Job<Payload>> {
+    validateOptions(options, ['key', 'runAt', 'delayMs']);
+    const key = databaseText(options.key, 'key', 500);
+    const input = submission(payload, options);
+    const { rows } = await this.execute<{ record: StoredJob }>(
+      `SELECT to_jsonb(tenon_jobs.request_job($1::uuid, $2::text, $3::jsonb, $4::text,
+        $5::timestamptz, $6::double precision, $7::jsonb, $8::boolean)) AS record`,
+      [
+        randomUUID(),
+        definition.name,
+        input.payload,
+        key,
+        input.run_at,
+        input.delay_ms,
+        JSON.stringify(executionPolicy(definition)),
+        options.runAt !== undefined || options.delayMs !== undefined,
+      ],
+    );
+    return jobRecord<Payload>(rows[0]!.record);
   }
 
   async sendMany<Payload>(
@@ -164,14 +167,14 @@ export class JobRecords {
     integer(inputs.length, 'batch size', 0, 1000);
     if (!inputs.length) return [];
     const prepared = Array.from(inputs, ({ payload, ...options }) => {
-      const input = submission(payload, options);
+      const input = sendInput(payload, options);
       return { ...input, payload: JSON.parse(input.payload) as unknown };
     });
     const { rows } = await this.execute<{ record: StoredJob }>(
-      `INSERT INTO tenon_jobs.jobs AS j (id, name, payload, key, run_at, policy)
-       SELECT x.id, $1, COALESCE(x.payload, 'null'::jsonb), x.key,
+      `INSERT INTO tenon_jobs.jobs AS j (id, name, payload, run_at, policy)
+       SELECT x.id, $1, COALESCE(x.payload, 'null'::jsonb),
          COALESCE(x.run_at, clock_timestamp() + x.delay_ms * interval '1 millisecond'), $3::jsonb
-       FROM jsonb_to_recordset($2::jsonb) AS x(id uuid, payload jsonb, key text, run_at timestamptz, delay_ms double precision)
+       FROM jsonb_to_recordset($2::jsonb) AS x(id uuid, payload jsonb, run_at timestamptz, delay_ms double precision)
        ON CONFLICT DO NOTHING RETURNING to_jsonb(j) AS record`,
       [definition.name, JSON.stringify(prepared), JSON.stringify(executionPolicy(definition))],
     );
@@ -229,7 +232,11 @@ export class JobRecords {
   }
 
   async cancel(id: string): Promise<Job> {
-    return this.mutate(id, "state = 'cancelled', finished_at = clock_timestamp()", []);
+    return this.mutate(
+      id,
+      "state = 'cancelled', blocked_by = NULL, finished_at = clock_timestamp()",
+      [],
+    );
   }
 
   /** A fresh job and attempt budget; the failed record and its history remain intact. */
@@ -280,9 +287,15 @@ export class JobRecords {
   }
 
   async stats(definition: JobDefinition<unknown>): Promise<JobStats> {
-    const { rows } = await this.execute<{ state: JobState; count: number; ready: number }>(
+    const { rows } = await this.execute<{
+      state: JobState;
+      count: number;
+      ready: number;
+      blocked: number;
+    }>(
       `SELECT state, count(*)::double precision AS count,
-         count(*) FILTER (WHERE state = 'pending' AND run_at <= statement_timestamp())::double precision AS ready
+         count(*) FILTER (WHERE state = 'pending' AND blocked_by IS NULL AND run_at <= statement_timestamp())::double precision AS ready,
+         count(*) FILTER (WHERE state = 'pending' AND blocked_by IS NOT NULL)::double precision AS blocked
        FROM tenon_jobs.jobs WHERE name = $1 GROUP BY state`,
       [definition.name],
     );
@@ -294,14 +307,17 @@ export class JobRecords {
       cancelled: 0,
     };
     let ready = 0;
+    let blocked = 0;
     for (const row of rows) {
       counts[row.state] = row.count;
       ready += row.ready;
+      blocked += row.blocked;
     }
     return {
       ...counts,
       ready,
-      delayed: counts.pending - ready,
+      delayed: counts.pending - ready - blocked,
+      blocked,
       total: rows.reduce((sum, row) => sum + row.count, 0),
     };
   }

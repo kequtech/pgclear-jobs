@@ -12,6 +12,8 @@ test('definitions are inert, immutable and preserve the handler', () => {
   assert.equal(called, false);
   assert.equal(definition.handler, handler);
   assert.equal(definition.maxAttempts, 3);
+  assert.equal(definition.retryBackoff, 'exponential');
+  assert.equal(definition.retryJitter, true);
   assert.equal(Object.isFrozen(definition), true);
 });
 
@@ -30,7 +32,6 @@ test('invalid policies and lossy JSON payloads fail before database access', () 
   circular.self = circular;
   for (const value of [
     undefined,
-    { x: undefined },
     NaN,
     1n,
     new Date(),
@@ -45,4 +46,12 @@ test('invalid policies and lossy JSON payloads fail before database access', () 
   assert.deepEqual(JSON.parse(serializePayload({ data: [1, true, null, 'ok 😀'] })), {
     data: [1, true, null, 'ok 😀'],
   });
+});
+
+test('optional object fields serialize naturally without changing array positions', () => {
+  const payload = { id: 'one', optional: undefined, nested: { absent: undefined, value: 1 } };
+  assert.deepEqual(JSON.parse(serializePayload(payload)), { id: 'one', nested: { value: 1 } });
+  assert.equal(Object.hasOwn(payload, 'optional'), true);
+  assert.throws(() => serializePayload([undefined]), TypeError);
+  assert.throws(() => serializePayload(undefined), TypeError);
 });

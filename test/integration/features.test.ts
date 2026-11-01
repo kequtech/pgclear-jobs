@@ -223,7 +223,7 @@ test('competing schedule passes create one occurrence and retain its identity af
   assert.equal((await jobs(pool).find(def)).length, 1);
 });
 
-test('overlap policy skips outstanding scheduled work or explicitly allows another occurrence', async () => {
+test('schedules skip outstanding work and resume after it terminates', async () => {
   const def = definition();
   const schedule = await jobs(pool).schedule(def, 42, { cron: '* * * * *' });
   const old = await jobs(pool).send(def, 41);
@@ -233,19 +233,17 @@ test('overlap policy skips outstanding scheduled work or explicitly allows anoth
   );
   await due(schedule.id);
   assert.equal(await advanceSchedules(pool, [def.name], 5000), 0);
-  await jobs(pool).schedule(def, 42, { cron: '* * * * *', overlap: 'allow' });
+  await jobs(pool).cancel(old.id);
   await due(schedule.id);
   assert.equal(await advanceSchedules(pool, [def.name], 5000), 1);
-  assert.equal((await jobs(pool).find(def, { states: ['pending'] })).length, 2);
+  assert.equal((await jobs(pool).find(def, { states: ['pending'] })).length, 1);
 });
 
-test('downtime produces at most one catch-up job, or skips an old occurrence', async () => {
+test('downtime produces one catch-up occurrence without replaying every missed tick', async () => {
   const def = definition();
   const month = ((new Date().getUTCMonth() + 6) % 12) + 1;
   const cron = `0 0 1 ${month} *`;
-  const skipped = await jobs(pool).schedule(def, 1, { cron, key: 'skip', missed: 'skip' });
   const once = await jobs(pool).schedule(def, 2, { cron, key: 'once' });
-  await due(skipped.id);
   await due(once.id);
   assert.equal(await advanceSchedules(pool, [def.name], 5000), 1);
   const work = await jobs(pool).find(def);
@@ -305,23 +303,4 @@ test('runners turn only their selected schedules into ordinary executable jobs',
   }
   assert.ok(scheduledFor);
   assert.equal((await jobs(pool).find(unknown)).length, 0);
-});
-
-test('older persisted policies receive new defaults without rewriting their records', async () => {
-  const def = definition({ retryDelayMs: 100 });
-  const row = await jobs(pool).send(def, 1);
-  await pool.queryClassic(
-    "UPDATE tenon_jobs.jobs SET policy = policy - 'retryMaxDelayMs' - 'retryJitter' WHERE id = $1",
-    [row.id],
-  );
-  const old = (await jobs(pool).get(row.id))!;
-  assert.equal(old.policy.retryMaxDelayMs, 86400000);
-  assert.equal(old.policy.retryJitter, false);
-  await finishClaim(
-    execute,
-    (await claimJob(execute, [def.name], 30000)).claim!,
-    'temporary failure',
-  );
-  const retried = (await jobs(pool).get(row.id))!;
-  assert.ok(Math.abs(retried.runAt.getTime() - retried.updatedAt.getTime() - 100) <= 5);
 });

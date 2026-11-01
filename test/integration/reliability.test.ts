@@ -162,7 +162,7 @@ test('invalid PostgreSQL JSON text is rejected before it aborts the caller trans
     }
     for (const key of ['\0', '\ud800']) {
       assert.throws(() => defineJob({ name: key, handler() {} }), TypeError);
-      await assert.rejects(jobs(tx).send(def, null, { key }), TypeError);
+      await assert.rejects(jobs(tx).request(def, null, { key }), TypeError);
       await assert.rejects(jobs(tx).find(def, { key }), TypeError);
       await assert.rejects(jobs(tx).schedule(def, null, { cron: '* * * * *', key }), TypeError);
       await assert.rejects(jobs(tx).unschedule(def, key), TypeError);

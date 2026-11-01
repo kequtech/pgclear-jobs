@@ -5,7 +5,7 @@ export type {
   JobRecords,
   SendOptions,
   TimingOptions,
-  UpsertOptions,
+  RequestOptions,
   Submission,
   FindOptions,
   Attempt,

@@ -15,6 +15,8 @@ export interface Job<Payload = unknown> {
   readonly name: string;
   readonly payload: Payload;
   readonly key: string | null;
+  /** ID of the job blocking this pending follow-up until it becomes terminal. */
+  readonly blockedBy: string | null;
   readonly state: JobState;
   readonly attempts: number;
   readonly policy: ExecutionPolicy;
@@ -55,6 +57,7 @@ export interface StoredJob {
   name: string;
   payload: unknown;
   key: string | null;
+  blocked_by: string | null;
   state: JobState;
   attempt_count: number;
   policy: ExecutionPolicy;
@@ -76,6 +79,7 @@ export function jobRecord<Payload = unknown>(row: StoredJob): Job<Payload> {
     name: row.name,
     payload: row.payload as Payload,
     key: row.key,
+    blockedBy: row.blocked_by,
     state: row.state,
     attempts: row.attempt_count,
     policy: executionPolicy(row.policy),

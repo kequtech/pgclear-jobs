@@ -1,0 +1,530 @@
+{
+  "description": "Synthetic local PostgreSQL measurements, not a production capacity guarantee. Two runners share one Node process. Pool peaks are sampled every 10 ms. Plan timings are single EXPLAIN ANALYZE observations, not averages.",
+  "queueKinds": {
+    "0": "bulk backlog",
+    "1": "quiet queue",
+    "2": "expected retries",
+    "3": "200 ms delayed work"
+  },
+  "before": {
+    "recordedAt": "2026-11-01T11:24:08.175Z",
+    "node": "v24.4.1",
+    "postgres": "16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)",
+    "cpu": "AMD Ryzen Threadripper 3970X 32-Core Processor",
+    "availableCpus": 64,
+    "durationMs": 10000,
+    "profiles": [
+      {
+        "profile": "balanced",
+        "queryPoolSize": 4,
+        "runners": 2,
+        "concurrencyPerRunner": 4,
+        "handlerDbMs": 0,
+        "applicationDbMs": 2,
+        "initialBacklog": 1500,
+        "retainedHistory": 20000,
+        "initialExpiredHistory": 3000,
+        "submitted": 3711,
+        "retries": 67,
+        "producingMs": 10022,
+        "totalMs": 19450,
+        "throughputPerSecond": 191,
+        "peakOutstanding": 2127,
+        "peakWaiting": 10,
+        "peakConnections": 4,
+        "enqueueMs": {
+          "p50": 17.7,
+          "p95": 34.78,
+          "p99": 48.64
+        },
+        "startDelayMs": [
+          {
+            "kind": 0,
+            "p50": 9109.65,
+            "p95": 9674.88,
+            "p99": 9704.6
+          },
+          {
+            "kind": 1,
+            "p50": 9507.47,
+            "p95": 9702.14,
+            "p99": 9720.41
+          },
+          {
+            "kind": 2,
+            "p50": 9596.72,
+            "p95": 17211.28,
+            "p99": 18616.83
+          },
+          {
+            "kind": 3,
+            "p50": 9713.15,
+            "p95": 9914.07,
+            "p99": 9930.8
+          }
+        ],
+        "application": {
+          "operations": 1422,
+          "p95Ms": 17.08,
+          "p99Ms": 26.06
+        },
+        "eventLoopP99Ms": 21.12,
+        "expiredAttempts": 0,
+        "failedJobs": 0,
+        "remainingExpiredHistory": 0,
+        "plans": {
+          "claim": {
+            "executionMs": 4.506,
+            "sharedBufferHits": 138,
+            "scanTypes": [
+              "Bitmap Heap Scan",
+              "Bitmap Index Scan",
+              "CTE Scan",
+              "Index Only Scan",
+              "Index Scan",
+              "Subquery Scan"
+            ],
+            "indexes": ["jobs_pending", "jobs_pkey", "jobs_schedule_outstanding"],
+            "maximumRowsPerScanNode": 1515
+          },
+          "cleanup": {
+            "executionMs": 8.704,
+            "sharedBufferHits": 1780,
+            "scanTypes": ["CTE Scan", "Index Scan", "Seq Scan", "Subquery Scan"],
+            "indexes": ["jobs_pkey"],
+            "maximumRowsPerScanNode": 3000
+          }
+        }
+      },
+      {
+        "profile": "contended",
+        "queryPoolSize": 2,
+        "runners": 2,
+        "concurrencyPerRunner": 4,
+        "handlerDbMs": 8,
+        "applicationDbMs": 12,
+        "initialBacklog": 1500,
+        "retainedHistory": 20000,
+        "initialExpiredHistory": 3000,
+        "submitted": 3370,
+        "retries": 57,
+        "producingMs": 10032,
+        "totalMs": 49511,
+        "throughputPerSecond": 68,
+        "peakOutstanding": 2983,
+        "peakWaiting": 13,
+        "peakConnections": 2,
+        "enqueueMs": {
+          "p50": 43.36,
+          "p95": 71.22,
+          "p99": 80.47
+        },
+        "startDelayMs": [
+          {
+            "kind": 0,
+            "p50": 24033.87,
+            "p95": 37259.4,
+            "p99": 38412.54
+          },
+          {
+            "kind": 1,
+            "p50": 32094.1,
+            "p95": 38069.25,
+            "p99": 38557.68
+          },
+          {
+            "kind": 2,
+            "p50": 34627.6,
+            "p95": 46773.06,
+            "p99": 48380.57
+          },
+          {
+            "kind": 3,
+            "p50": 32690.6,
+            "p95": 38610.37,
+            "p99": 38894.26
+          }
+        ],
+        "application": {
+          "operations": 1740,
+          "p95Ms": 52.18,
+          "p99Ms": 63.72
+        },
+        "eventLoopP99Ms": 21.04,
+        "expiredAttempts": 0,
+        "failedJobs": 0,
+        "remainingExpiredHistory": 0,
+        "plans": {
+          "claim": {
+            "executionMs": 1.347,
+            "sharedBufferHits": 122,
+            "scanTypes": [
+              "Bitmap Heap Scan",
+              "Bitmap Index Scan",
+              "CTE Scan",
+              "Index Only Scan",
+              "Index Scan",
+              "Subquery Scan"
+            ],
+            "indexes": ["jobs_pending", "jobs_pkey", "jobs_schedule_outstanding"],
+            "maximumRowsPerScanNode": 1500
+          },
+          "cleanup": {
+            "executionMs": 10.467,
+            "sharedBufferHits": 2855,
+            "scanTypes": ["CTE Scan", "Index Scan", "Seq Scan", "Subquery Scan"],
+            "indexes": ["jobs_pkey"],
+            "maximumRowsPerScanNode": 3000
+          }
+        }
+      }
+    ],
+    "intervalMs": 50
+  },
+  "after": {
+    "recordedAt": "2026-11-01T11:28:43.746Z",
+    "node": "v24.4.1",
+    "postgres": "16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)",
+    "cpu": "AMD Ryzen Threadripper 3970X 32-Core Processor",
+    "availableCpus": 64,
+    "durationMs": 10000,
+    "profiles": [
+      {
+        "profile": "balanced",
+        "queryPoolSize": 4,
+        "runners": 2,
+        "concurrencyPerRunner": 4,
+        "handlerDbMs": 0,
+        "applicationDbMs": 2,
+        "initialBacklog": 1500,
+        "retainedHistory": 20000,
+        "initialExpiredHistory": 3000,
+        "submitted": 3733,
+        "retries": 68,
+        "producingMs": 10040,
+        "totalMs": 11460,
+        "throughputPerSecond": 326,
+        "peakOutstanding": 1511,
+        "peakWaiting": 8,
+        "peakConnections": 4,
+        "enqueueMs": {
+          "p50": 10.86,
+          "p95": 18.48,
+          "p99": 20.93
+        },
+        "startDelayMs": [
+          {
+            "kind": 0,
+            "p50": 3550.23,
+            "p95": 5569.52,
+            "p99": 5734.28
+          },
+          {
+            "kind": 1,
+            "p50": 13.77,
+            "p95": 18.3,
+            "p99": 19.92
+          },
+          {
+            "kind": 2,
+            "p50": 19.68,
+            "p95": 41.78,
+            "p99": 47.12
+          },
+          {
+            "kind": 3,
+            "p50": 218.88,
+            "p95": 226.78,
+            "p99": 229.41
+          }
+        ],
+        "application": {
+          "operations": 916,
+          "p95Ms": 7.62,
+          "p99Ms": 10.92
+        },
+        "eventLoopP99Ms": 21.22,
+        "expiredAttempts": 0,
+        "failedJobs": 0,
+        "remainingExpiredHistory": 0,
+        "plans": {
+          "claim": {
+            "executionMs": 0.602,
+            "sharedBufferHits": 35,
+            "scanTypes": [
+              "CTE Scan",
+              "Function Scan",
+              "Index Only Scan",
+              "Index Scan",
+              "Subquery Scan"
+            ],
+            "indexes": ["jobs_pending", "jobs_pkey"],
+            "maximumRowsPerScanNode": 4
+          },
+          "cleanup": {
+            "executionMs": 1.371,
+            "sharedBufferHits": 1040,
+            "scanTypes": ["CTE Scan", "Function Scan", "Index Scan", "Subquery Scan"],
+            "indexes": ["jobs_pkey", "jobs_terminal"],
+            "maximumRowsPerScanNode": 100
+          }
+        }
+      },
+      {
+        "profile": "contended",
+        "queryPoolSize": 2,
+        "runners": 2,
+        "concurrencyPerRunner": 4,
+        "handlerDbMs": 8,
+        "applicationDbMs": 12,
+        "initialBacklog": 1500,
+        "retainedHistory": 20000,
+        "initialExpiredHistory": 3000,
+        "submitted": 3722,
+        "retries": 68,
+        "producingMs": 10016,
+        "totalMs": 44745,
+        "throughputPerSecond": 83,
+        "peakOutstanding": 3062,
+        "peakWaiting": 14,
+        "peakConnections": 2,
+        "enqueueMs": {
+          "p50": 31.87,
+          "p95": 39.37,
+          "p99": 43.04
+        },
+        "startDelayMs": [
+          {
+            "kind": 0,
+            "p50": 27054.26,
+            "p95": 33924.08,
+            "p99": 34504.02
+          },
+          {
+            "kind": 1,
+            "p50": 594.93,
+            "p95": 1203.85,
+            "p99": 1239.54
+          },
+          {
+            "kind": 2,
+            "p50": 2302.01,
+            "p95": 5035.23,
+            "p99": 5381.95
+          },
+          {
+            "kind": 3,
+            "p50": 804.47,
+            "p95": 1403.18,
+            "p99": 1437.58
+          }
+        ],
+        "application": {
+          "operations": 1704,
+          "p95Ms": 40.55,
+          "p99Ms": 45.92
+        },
+        "eventLoopP99Ms": 21.07,
+        "expiredAttempts": 0,
+        "failedJobs": 0,
+        "remainingExpiredHistory": 0,
+        "plans": {
+          "claim": {
+            "executionMs": 0.369,
+            "sharedBufferHits": 29,
+            "scanTypes": [
+              "CTE Scan",
+              "Function Scan",
+              "Index Only Scan",
+              "Index Scan",
+              "Subquery Scan"
+            ],
+            "indexes": ["jobs_pending", "jobs_pkey"],
+            "maximumRowsPerScanNode": 4
+          },
+          "cleanup": {
+            "executionMs": 2.575,
+            "sharedBufferHits": 1044,
+            "scanTypes": ["CTE Scan", "Function Scan", "Index Scan", "Subquery Scan"],
+            "indexes": ["jobs_pkey", "jobs_terminal"],
+            "maximumRowsPerScanNode": 100
+          }
+        }
+      }
+    ],
+    "intervalMs": 50
+  },
+  "steadyLoad": {
+    "recordedAt": "2026-11-01T11:34:04.698Z",
+    "node": "v24.4.1",
+    "postgres": "16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)",
+    "cpu": "AMD Ryzen Threadripper 3970X 32-Core Processor",
+    "availableCpus": 64,
+    "durationMs": 60000,
+    "intervalMs": 150,
+    "profiles": [
+      {
+        "profile": "balanced",
+        "queryPoolSize": 4,
+        "runners": 2,
+        "concurrencyPerRunner": 4,
+        "handlerDbMs": 0,
+        "applicationDbMs": 2,
+        "initialBacklog": 1500,
+        "retainedHistory": 20000,
+        "initialExpiredHistory": 3000,
+        "submitted": 5922,
+        "retries": 134,
+        "producingMs": 60131,
+        "totalMs": 60245,
+        "throughputPerSecond": 98,
+        "peakOutstanding": 1511,
+        "peakWaiting": 7,
+        "peakConnections": 4,
+        "enqueueMs": {
+          "p50": 7.86,
+          "p95": 14.79,
+          "p99": 18.45
+        },
+        "startDelayMs": [
+          {
+            "kind": 0,
+            "p50": 33.02,
+            "p95": 4018.61,
+            "p99": 4501.89
+          },
+          {
+            "kind": 1,
+            "p50": 10.14,
+            "p95": 18.85,
+            "p99": 23.55
+          },
+          {
+            "kind": 2,
+            "p50": 15.48,
+            "p95": 36.87,
+            "p99": 42.11
+          },
+          {
+            "kind": 3,
+            "p50": 205.06,
+            "p95": 210.22,
+            "p99": 212.81
+          }
+        ],
+        "application": {
+          "operations": 5110,
+          "p95Ms": 5.81,
+          "p99Ms": 8.39
+        },
+        "eventLoopP99Ms": 21.05,
+        "expiredAttempts": 0,
+        "failedJobs": 0,
+        "remainingExpiredHistory": 0,
+        "plans": {
+          "claim": {
+            "executionMs": 1.231,
+            "sharedBufferHits": 35,
+            "scanTypes": [
+              "CTE Scan",
+              "Function Scan",
+              "Index Only Scan",
+              "Index Scan",
+              "Subquery Scan"
+            ],
+            "indexes": ["jobs_pending", "jobs_pkey"],
+            "maximumRowsPerScanNode": 4
+          },
+          "cleanup": {
+            "executionMs": 1.345,
+            "sharedBufferHits": 1040,
+            "scanTypes": ["CTE Scan", "Function Scan", "Index Scan", "Subquery Scan"],
+            "indexes": ["jobs_pkey", "jobs_terminal"],
+            "maximumRowsPerScanNode": 100
+          }
+        }
+      },
+      {
+        "profile": "contended",
+        "queryPoolSize": 2,
+        "runners": 2,
+        "concurrencyPerRunner": 4,
+        "handlerDbMs": 8,
+        "applicationDbMs": 12,
+        "initialBacklog": 1500,
+        "retainedHistory": 20000,
+        "initialExpiredHistory": 3000,
+        "submitted": 5922,
+        "retries": 134,
+        "producingMs": 60131,
+        "totalMs": 71900,
+        "throughputPerSecond": 82,
+        "peakOutstanding": 1511,
+        "peakWaiting": 13,
+        "peakConnections": 2,
+        "enqueueMs": {
+          "p50": 29.04,
+          "p95": 36.23,
+          "p99": 39.27
+        },
+        "startDelayMs": [
+          {
+            "kind": 0,
+            "p50": 20188.58,
+            "p95": 24793.4,
+            "p99": 25197.3
+          },
+          {
+            "kind": 1,
+            "p50": 37.16,
+            "p95": 44.23,
+            "p99": 47.15
+          },
+          {
+            "kind": 2,
+            "p50": 49.9,
+            "p95": 129.03,
+            "p99": 134.33
+          },
+          {
+            "kind": 3,
+            "p50": 236.15,
+            "p95": 247.26,
+            "p99": 252.56
+          }
+        ],
+        "application": {
+          "operations": 2710,
+          "p95Ms": 40.78,
+          "p99Ms": 43.66
+        },
+        "eventLoopP99Ms": 21.07,
+        "expiredAttempts": 0,
+        "failedJobs": 0,
+        "remainingExpiredHistory": 0,
+        "plans": {
+          "claim": {
+            "executionMs": 0.485,
+            "sharedBufferHits": 32,
+            "scanTypes": [
+              "CTE Scan",
+              "Function Scan",
+              "Index Only Scan",
+              "Index Scan",
+              "Subquery Scan"
+            ],
+            "indexes": ["jobs_pending", "jobs_pkey"],
+            "maximumRowsPerScanNode": 4
+          },
+          "cleanup": {
+            "executionMs": 1.367,
+            "sharedBufferHits": 1040,
+            "scanTypes": ["CTE Scan", "Function Scan", "Index Scan", "Subquery Scan"],
+            "indexes": ["jobs_pkey", "jobs_terminal"],
+            "maximumRowsPerScanNode": 100
+          }
+        }
+      }
+    ]
+  }
+}

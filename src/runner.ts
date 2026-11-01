@@ -1,8 +1,8 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { setMaxListeners } from 'node:events';
-import { createPool, listen } from '@kequtech/pgclear';
-import type { ConnectionOptions, Listener, Pool, PoolOptions } from '@kequtech/pgclear';
-import { integer } from './definition.js';
+import { listen } from '@kequtech/pgclear';
+import type { ConnectionOptions, Listener, Pool } from '@kequtech/pgclear';
+import { integer, validateOptions } from './definition.js';
 import { errorText, JobError } from './errors.js';
 import type { JobDefinition } from './definition.js';
 import { claimJob, finishClaim, recoverClaims, renewClaim } from './claims.js';
@@ -11,13 +11,14 @@ import { checkSchema, notificationChannel } from './schema.js';
 import type { Execute } from './storage.js';
 import { settleOrAbort, Wakeup } from './wakeup.js';
 import { advanceSchedules } from './schedules.js';
+import { pruneCompleted } from './retention.js';
 
 export interface RunnerOptions {
   readonly signal?: AbortSignal;
   /** Maximum unfinished handlers in this runner, including timed-out handlers. Default 1. */
   readonly concurrency?: number;
-  /** Listener connection for a borrowed pool, or false to disable notifications. */
-  readonly notifications?: string | ConnectionOptions | false;
+  /** Optional dedicated listener connection. Omit to use polling. */
+  readonly notifications?: string | ConnectionOptions;
   /** Fallback interval: default 30000 with notifications, otherwise 1000. */
   readonly pollIntervalMs?: number;
   /** One recovery batch per interval, independently of execution slots. Default 1000. */
@@ -28,6 +29,8 @@ export interface RunnerOptions {
   readonly shutdownTimeoutMs?: number;
   /** Bound each driver operation, including pool acquisition and listener startup. Default 10000. */
   readonly databaseTimeoutMs?: number;
+  /** Completed/cancelled history: default 7 days. False disables automatic cleanup. */
+  readonly retentionMs?: number | false;
 }
 
 async function pause(ms: number, signal: AbortSignal): Promise<void> {
@@ -121,31 +124,39 @@ function notificationWarning(error: unknown): void {
   });
 }
 
-function listenerConnection(connection: string | PoolOptions): string | ConnectionOptions {
-  if (typeof connection === 'string') return connection;
-  const {
-    maxConnections,
-    maxWaiting,
-    acquireTimeoutMs,
-    idleTimeoutMs,
-    maxLifetimeMs,
-    ...settings
-  } = connection;
-  return settings;
-}
-
-/** A supplied pool is borrowed. Connection settings create a runner-owned pool and listener. */
+/** Run committed work using an application-owned pool; the caller observes and supervises this promise. */
 export async function runJobs(
-  connection: Pool | string | PoolOptions,
+  pool: Pool,
   definitions: readonly JobDefinition<unknown>[],
   options: RunnerOptions = {},
 ): Promise<void> {
+  if (!pool || typeof pool.queryClassic !== 'function' || typeof pool.transaction !== 'function')
+    throw new TypeError('runJobs requires an application-owned pgclear pool.');
+  validateOptions(options, [
+    'signal',
+    'concurrency',
+    'notifications',
+    'pollIntervalMs',
+    'recoveryIntervalMs',
+    'leaseMs',
+    'shutdownTimeoutMs',
+    'databaseTimeoutMs',
+    'retentionMs',
+  ]);
   const concurrency = integer(options.concurrency ?? 1, 'concurrency', 1, 1000);
-  const borrowed = typeof connection !== 'string' && 'queryClassic' in connection;
-  const notifications =
-    options.notifications ?? (borrowed ? false : listenerConnection(connection));
+  const notifications = options.notifications;
+  if (
+    notifications !== undefined &&
+    typeof notifications !== 'string' &&
+    (typeof notifications !== 'object' || notifications === null)
+  )
+    throw new TypeError('notifications must contain listener connection settings.');
+  const retentionMs =
+    options.retentionMs === false
+      ? false
+      : integer(options.retentionMs ?? 7 * 86_400_000, 'retentionMs', 1, Number.MAX_SAFE_INTEGER);
   const pollMs = integer(
-    options.pollIntervalMs ?? (notifications === false ? 1000 : 30_000),
+    options.pollIntervalMs ?? (notifications === undefined ? 1000 : 30_000),
     'pollIntervalMs',
   );
   const recoveryMs = integer(options.recoveryIntervalMs ?? 1000, 'recoveryIntervalMs');
@@ -157,8 +168,8 @@ export async function runJobs(
     throw new TypeError('Supply at least one definition, with no duplicate names.');
   }
   if (options.signal?.aborted) return;
-  const pool = borrowed ? connection : createPool(connection);
   const names = [...byName.keys()];
+  let nextDefinition = 0;
   const stop = new AbortController();
   const abandon = new AbortController();
   setMaxListeners(concurrency + 1, abandon.signal);
@@ -183,12 +194,12 @@ export async function runJobs(
   let maintenance: Promise<void> | undefined;
   let listening: Promise<void> | undefined;
   const startListener = async () => {
-    if (notifications === false) return;
+    if (notifications === undefined) return;
     while (!stop.signal.aborted) {
       let listener: Listener | undefined;
       const closed = Promise.withResolvers<void>();
       try {
-        listener = await listen(listenerConnection(notifications), {
+        listener = await listen(notifications, {
           channels: [notificationChannel],
           reconnect: true,
           signal: stop.signal,
@@ -218,16 +229,22 @@ export async function runJobs(
     await checkSchema(execute);
     listening = startListener().catch(fail);
     maintenance = (async () => {
+      let nextCleanup = 0;
       while (!stop.signal.aborted) {
         const recovered = await recoverClaims(execute);
         const scheduled = await advanceSchedules(pool, names, databaseMs);
         if (recovered || scheduled) wake.notify();
+        if (retentionMs !== false && performance.now() >= nextCleanup) {
+          const removed = await pruneCompleted(execute, names, retentionMs);
+          // Drain a large expired history in bounded passes; otherwise check once a minute.
+          nextCleanup = removed === 100 ? 0 : performance.now() + 60_000;
+        }
         await pause(recoveryMs, stop.signal);
       }
     })().catch(fail);
     while (!stop.signal.aborted) {
       const version = wake.version;
-      const available = names.filter(
+      const available = [...names.slice(nextDefinition), ...names.slice(0, nextDefinition)].filter(
         (name) => (counts.get(name) ?? 0) < (byName.get(name)!.concurrency ?? concurrency),
       );
       if (active.size < concurrency && available.length) {
@@ -235,6 +252,8 @@ export async function runJobs(
         const { claim, delayMs } = await claimJob(execute, available, leaseMs);
         if (stop.signal.aborted) break;
         if (claim) {
+          // Rotate successful claims so an older backlog cannot monopolize every local slot.
+          nextDefinition = (names.indexOf(claim.name) + 1) % names.length;
           counts.set(claim.name, (counts.get(claim.name) ?? 0) + 1);
           const task = executeClaim(
             execute,
@@ -253,7 +272,8 @@ export async function runJobs(
           active.add(task);
           continue;
         }
-        const backstop = notifications !== false && !connected ? Math.min(pollMs, 1000) : pollMs;
+        const backstop =
+          notifications !== undefined && !connected ? Math.min(pollMs, 1000) : pollMs;
         await wake.wait(version, Math.min(backstop, Math.max(1, delayMs ?? backstop)), stop.signal);
       } else {
         await wake.wait(version, 2_147_483_647, stop.signal);
@@ -266,7 +286,6 @@ export async function runJobs(
     await Promise.all([...active, maintenance, listening]);
     options.signal?.removeEventListener('abort', shutdown);
     clearTimeout(shutdownTimer);
-    if (!borrowed) await pool.close({ timeoutMs: databaseMs });
   }
   if (failures.length) throw failures[0];
 }

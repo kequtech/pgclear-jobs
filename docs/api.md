@@ -1,197 +1,204 @@
 # API
 
-Core exports come from `@kequtech/tenon-jobs`. The optional `/tenon` entry point exports
-`jobs(scope)` for a Tenon database or transaction; its record API is identical to core pgclear scopes.
+Import from `@kequtech/tenon-jobs` for pgclear, or `/tenon` for Tenon. The Tenon entry point re-exports
+the full API and adapts `jobs` for a Tenon database or transaction. No facade opens or commits a caller's
+transaction. Start with the [quick start](../README.md); this document covers the full contract.
 
 ## Definitions
 
 ```ts
 const sync = defineJob({
   name: 'sync-account',
-  maxAttempts: 8,
-  retryDelayMs: 1000,
-  retryMaxDelayMs: 60_000,
-  retryJitter: true,
-  concurrency: 2,
-  async handler(payload: { accountId: string }, context) {
-    await synchronize(payload.accountId, context.signal);
+  async handler(payload: { accountId: string }, { signal }) {
+    await synchronize(payload.accountId, signal);
   },
 });
 ```
 
-Definitions are immutable and inert. Names contain 1–200 characters and cannot be blank.
-Handlers return `void` or `Promise<void>`; persist business results in app-owned records.
+Definitions are immutable and open no connections. Names contain 1–200 characters and cannot be
+blank. Handlers return `void` or `Promise<void>`; business results belong in application records.
 
-| Policy               | Default       | Meaning                                         |
-| -------------------- | ------------- | ----------------------------------------------- |
-| `maxAttempts`        | 3             | Total attempts including the first; 1–1000      |
-| `retryDelayMs`       | 1000          | Base delay; 0–86400000 ms                       |
-| `retryBackoff`       | `exponential` | `fixed` or base × 2^(attempt−1)                 |
-| `retryMaxDelayMs`    | 86400000      | Delay cap; 0–2147483647 ms                      |
-| `retryJitter`        | false         | Choose between half and all of the capped delay |
-| `executionTimeoutMs` | 300000        | Attempt deadline; 1–2147483647 ms               |
+| Definition option    | Default        | Meaning                                            |
+| -------------------- | -------------- | -------------------------------------------------- |
+| `maxAttempts`        | 3              | Total attempts, including the first; 1–1000        |
+| `executionTimeoutMs` | 300000         | Per-attempt execution limit                        |
+| `concurrency`        | Runner's limit | Per-definition cap within each runner              |
+| `retryDelayMs`       | 1000           | Base delay; 0–86400000 ms                          |
+| `retryBackoff`       | `exponential`  | `exponential` or `fixed`                           |
+| `retryMaxDelayMs`    | 86400000       | Cap before jitter                                  |
+| `retryJitter`        | true           | Randomize between half and all of the capped delay |
 
-Optional `concurrency` is 1–1000, per definition **within each runner's** overall limit.
-It is not a distributed limit. Submissions snapshot execution policy. Existing work retains its
-policy when code changes, while the deployed handler for its name executes it.
+Execution limits and retry policy are saved with each new job. Deployed handlers run existing jobs
+with their saved policy; new policy settings apply to new records. Definition concurrency is local
+to each runner, not a distributed limit. Its range is 1–1000.
 
-The handler context contains `id`, one-based `attempt`, saved `maxAttempts`, cooperative `signal`,
-and `scheduledFor` (a Date for a recurring occurrence, otherwise null).
+Handler context contains `id`, one-based `attempt`, saved `maxAttempts`, cooperative `signal`, and
+`scheduledFor` (a Date for a recurring occurrence, otherwise null).
 
-Payloads must be JSON primitives, dense arrays or plain objects. Undefined, nonfinite numbers,
-bigint, cycles, Dates, accessors, symbols and other lossy JSON values are rejected before SQL.
-Names, keys, payload strings and object keys reject NUL and unpaired Unicode surrogates.
-TypeScript does not validate stored payload schemas; validate untrusted data in application code.
+Throw normally to retry. `new JobError(message, { retry: false })` fails permanently.
+`new JobError(message, { retryAt: date })` honors a provider's retry time without shortening policy
+backoff or extending the attempt budget.
 
-## Submission
+Payloads are JSON primitives, dense arrays or plain objects. Undefined object fields are omitted
+without mutating the original payload. Top-level undefined, undefined array elements, nonfinite
+numbers, bigint, cycles, Dates, accessors, symbols and other lossy values are rejected before SQL.
+Names, keys and JSON text reject NUL and unpaired Unicode surrogates. Validate untrusted application
+payloads in application code; TypeScript does not validate previously stored JSON schemas.
 
-All methods below belong to `jobs(scope)`. They use that scope and never start or commit a caller's
-transaction. `runAt: Date` and `delayMs: number` are mutually exclusive; relative delay uses the
-database clock and accepts 0–2147483647 ms. Omitted timing means immediately eligible.
+## Submit work
 
-### `send(definition, payload, options?)`
+Submission methods accept `runAt: Date` or `delayMs: number`, not both. Relative delay uses the
+PostgreSQL clock. Omitted timing makes new work immediately eligible. Millisecond timing options
+accept positive 32-bit integers; `delayMs` also accepts zero. Unknown submission options are rejected.
 
-Returns `Job<Payload>`. Options contain timing and optionally **one** of:
+### `send(definition, payload, { id?, runAt?, delayMs? }?)`
 
-- `id`: a UUID. An existing ID returns its original record unchanged, including terminal records.
-  IDs are database-wide; reusing another definition's ID raises `JobStateError`.
-- `key`: a string up to 500 characters, scoped to the definition name. Pending and running records,
-  including retries, occupy the key. A collision returns unchanged work. Terminal records release it.
+Creates an independent job and returns `Job<Payload>`. Every call creates work unless an optional
+stable UUID already exists. Reusing that UUID returns its original record unchanged in any state,
+including completed. Reusing an ID from another definition raises `JobStateError`.
 
-Without either option, every call creates independent work. A result has no created/existing flag.
-ID deduplication lasts only while the original record exists. Neither mechanism deduplicates external
-handler effects. Conflict paths can wait for another transaction and hold row locks until commit.
+Stable IDs identify retained submissions; cleanup releases their deduplication. Retain the same UUID
+outside an uncertain transaction when reconciling a lost response. `send` has no keyed deduplication
+mode: use `request` when the desired work represents the latest state of an entity.
+
+### `request(definition, payload, { key, runAt?, delayMs? })`
+
+Returns the pending `Job<Payload>` for the required key (up to 500 characters, scoped to the
+job definition). If no work exists, inserts it. If pending work has never started, replaces its
+payload and supplied timing. Omitted timing preserves an existing job's execution time.
+
+Once any attempt has begun, leaves the current job and its automatic retries unchanged and retains
+one pending successor. Later requests replace that successor's payload and supplied timing. It has
+its own ID, saved execution policy and fresh attempt budget. A `blockedBy` ID marks it while waiting.
+Completion, permanent failure, exhausted recovery, or cancellation during retry backoff releases it
+atomically. Its requested execution time is preserved; both the time and predecessor termination
+must permit execution. Further requests can create another successor once it starts.
+
+There is at most one head and one blocked successor per definition/key. Concurrent requests use
+row-lock serialization order. Multiple requests coalesce; each call does not promise a separate run.
+Payloads are replaced rather than merged. Preserve domain rules such as a sticky force flag in
+application-owned state. This contract orders valid claims; stale handlers can outlive their lease.
+
+Use ordinary `get`, `find`, `update`, `reschedule`, and `cancel` methods for successors. Cancelling a
+blocked successor leaves its predecessor alone and permits a replacement. All changes join the
+caller's transaction. Keep transactions short: a conflicting request can delay a heartbeat.
 
 ### `sendMany(definition, submissions)`
 
-Each submission is `{ payload, id?, key?, runAt?, delayMs? }` with the same validation and mutually
-exclusive options as `send`. The batch accepts 0–1000 submissions; an empty batch returns `[]`.
-All inputs are validated before one INSERT. Any database error rolls back the statement.
-Duplicate IDs or outstanding keys, including duplicates within the batch, are skipped.
-Returns **only inserted** typed jobs; order is not guaranteed. Use supplied IDs to correlate results.
+Accepts up to 1000 `{ payload, id?, runAt?, delayMs? }` entries. Validates every entry before one
+INSERT. Duplicate IDs, including duplicates within the batch, are skipped. Returns only inserted
+jobs, with no order guarantee. Supply IDs to correlate input and output. An empty batch returns `[]`.
+Use individual `request` calls for keyed coalescing.
 
-### `upsert(definition, payload, { key, runAt?, delayMs? })`
+## Inspect and operate
 
-The key is required. Inserts if it is free; otherwise replaces a pending job's payload and supplied
-timing, returning the same ID. Omitted timing preserves the existing execution time. Existing policy,
-attempt count and history remain unchanged. Concurrent upserts agree on one outstanding record.
-If that record is running, throws `JobStateError` without changing it or aborting the caller's
-transaction. This method promises no trailing execution after running work.
+A `Job<Payload>` contains `id`, `name`, typed `payload`, nullable `key`, `blockedBy`, `state`,
+`attempts`, saved `policy`, `lastError`, and lifecycle Dates (`runAt`, `createdAt`, `updatedAt`,
+nullable `finishedAt`). Nullable occurrence fields are `scheduleId` and `scheduledFor`.
+`retryOf` links a manual retry to the original failure; cleanup can remove that original later.
+`cursor` is an opaque pagination position preserving PostgreSQL timestamp precision.
 
-## Records and inspection
+| Method                                          | Result                                                                |
+| ----------------------------------------------- | --------------------------------------------------------------------- |
+| `get(id)`                                       | `Job<unknown>` or null                                                |
+| `find(def, { key?, states?, limit?, after? }?)` | Jobs in creation-time/UUID order                                      |
+| `stats(def)`                                    | Retained counts by state, plus `ready`, `delayed`, `blocked`, `total` |
+| `attempts(id, { limit? }?)`                     | Latest attempts first; absent IDs return `[]`                         |
+| `update(def, id, payload)`                      | Replace a pending payload                                             |
+| `reschedule(id, runAt)`                         | Set a pending execution time                                          |
+| `cancel(id)`                                    | Cancel pending work                                                   |
+| `retry(id)`                                     | Create a new job from a failed record                                 |
+| `remove(id)`                                    | Delete terminal history; true if removed, false if absent             |
+| `prune(def, { before, states?, limit? })`       | Delete a bounded terminal-history batch                               |
 
-A `Job<Payload>` contains `id`, `name`, typed `payload`, nullable `key`, `state`, `attempts`,
-`policy`, `lastError`, and lifecycle Dates (`runAt`, `createdAt`, `updatedAt`, nullable `finishedAt`).
-Occurrence fields are nullable `scheduleId` and `scheduledFor`. `retryOf` links a manually retried
-job to its original failure; it can refer to a record later removed by cleanup.
-`cursor` is an opaque pagination position preserving database timestamp precision.
+Lists default to 100 and permit at most 1000. Continue `find` with the last returned job's `cursor`
+as `after`, keeping the same filters. A removed cursor row remains usable. Pagination is a live
+traversal, not a frozen snapshot. `states: []` matches nothing. Attempts expose `number`, `startedAt`,
+nullable `finishedAt`, `outcome` (`completed`, `failed`, `expired`, or null), and nullable `error`.
 
-| Method                                                 | Result                                                |
-| ------------------------------------------------------ | ----------------------------------------------------- |
-| `get(id)`                                              | `Job<unknown>` or null                                |
-| `find(definition, { key?, states?, limit?, after? }?)` | Typed records in creation-time, then UUID order       |
-| `attempts(id, { limit? }?)`                            | Newest attempts first; absent IDs return `[]`         |
-| `stats(definition)`                                    | Counts by state, plus `ready`, `delayed`, and `total` |
+Statistics use one database snapshot. `pending` is the sum of ready, future delayed and blocked
+work. A blocked job is counted as blocked regardless of its requested execution time. Counts
+represent retained records, not historical throughput.
 
-Lists default to 100 and permit at most 1000. `states: []` matches nothing. An omitted state filter
-matches all states. To continue, pass the last returned job's `cursor` as `after`, using the same
-definition and filters. Stop when a page is empty. Removing the cursor row does not invalidate its
-position. Pagination is a live traversal: concurrent changes are not a frozen snapshot.
+Mutations refuse ineligible states with `JobStateError` and missing targets with `JobNotFoundError`.
+These errors leave the caller's transaction usable. Cancellation never revokes running external
+effects. Explicit pending edits can change retry payloads; ordinary `request` preserves them.
+Manual retry creates a fresh UUID and budget, preserving original history and schedule context;
+`retryOf` links the records. An occupied key raises `JobStateError`. Repeated unkeyed manual retries
+can create independent work; reconcile a lost response through application state.
 
-Each attempt contains `number`, `startedAt`, nullable `finishedAt`, `outcome`
-(`completed`, `failed`, `expired`, or null), and nullable `error`.
-Statistics use one current database snapshot, without a cache: `pending` includes both `ready`
-and future `delayed` work. Counts describe retained records, not historical throughput.
+## Retention
 
-## Mutations and maintenance
+Runners automatically remove completed and cancelled history older than seven days, for their
+selected definitions. Cleanup also removes attempts and releases stable-ID deduplication. Failures,
+pending jobs, running jobs and blocked successors are retained. `retentionMs` on the runner extends
+this window or disables automatic cleanup with `false`. Prefer the same setting across runners
+selecting the same definition; the shortest configured retention can delete shared history.
 
-| Method                                           | Contract                                                                 |
-| ------------------------------------------------ | ------------------------------------------------------------------------ |
-| `update(definition, id, payload)`                | Replace a matching pending payload; returns typed job                    |
-| `reschedule(id, runAt)`                          | Set a pending job's execution time; returns job                          |
-| `cancel(id)`                                     | Cancel a pending job; returns job                                        |
-| `retry(id)`                                      | Create a fresh job from a failed record; returns new job                 |
-| `remove(id)`                                     | Delete a terminal job and its attempts; true if removed, false if absent |
-| `prune(definition, { before, states?, limit? })` | Delete one bounded batch of terminal records; returns count              |
-
-Missing mutation targets raise `JobNotFoundError`; ineligible targets raise `JobStateError`.
-`remove` is idempotent for absent IDs, but refuses pending/running jobs. State conflicts are ordinary
-application errors, so a caller can catch them and continue its transaction. Concurrent deletion may
-change a diagnostic not-found/state result. IDs and input values are validated before SQL; database
-faults, serialization failures and deadlocks propagate without automatic retries.
-
-Manual `retry` copies payload, key, saved policy and schedule context into a **new ID** linked by
-`retryOf`, with zero attempts and a fresh policy budget. The original remains failed with its history.
-A currently occupied key raises `JobStateError`; the caller transaction remains usable. Update any
-app reference to the returned job ID. Repeated unkeyed retry calls request independent jobs;
-a lost commit response still needs application reconciliation.
-
-`prune` considers `finishedAt < before`, ordered by finish time and UUID. Defaults are
-`states: ['completed', 'cancelled']`, `limit: 100`; the maximum is 1000. Failures require an explicit
-`'failed'` selection. Pending/running states are never accepted. Locked rows are skipped; zero can
-mean remaining candidates are locked. Deletion cascades to attempt history. No automatic retention
-policy deletes app work; schedule explicit cleanup if desired. All mutations join `jobs(tx)`.
+Manual `prune` uses `finishedAt < before`; defaults are `states: ['completed', 'cancelled']` and
+`limit: 100`, maximum 1000. Include `'failed'` explicitly to prune failures. Nonterminal states are
+rejected. Locked records are skipped. `remove` and `prune` join caller transactions.
 
 ## Recurring schedules
 
 ```ts
-await jobs(pool).schedule(
-  cleanup,
-  {},
-  {
-    key: 'hourly',
-    cron: '0 * * * *',
-    timeZone: 'UTC',
-    missed: 'once',
-    overlap: 'skip',
-  },
-);
+await jobs(pool).schedule(cleanup, {}, { cron: '0 * * * *' });
 ```
 
-A schedule belongs to a definition name and schedule key (default `''`), distinct from individual
-job keys. `schedule` inserts or updates it and returns a typed `Schedule`. An unchanged cron/zone
-preserves its cursor; changes start at the next future occurrence. Payload and policy changes apply
-to future jobs. Five-field deterministic cron expressions are required; randomized `H` is rejected.
+Options are required five-field `cron`, optional IANA `timeZone` (default `UTC`), and optional
+schedule `key` (default empty string, at most 500 characters). Multiple keys allow multiple schedules
+for a definition. Randomized `H` cron expressions are rejected.
 
-| Option     | Default  | Meaning                                                                        |
-| ---------- | -------- | ------------------------------------------------------------------------------ |
-| `cron`     | Required | Five-field expression                                                          |
-| `timeZone` | `UTC`    | IANA time zone                                                                 |
-| `key`      | `''`     | Schedule identity within the definition; up to 500 characters                  |
-| `missed`   | `once`   | Submit one saved due occurrence, or `skip` if more than one minute late        |
-| `overlap`  | `skip`   | Suppress while that schedule has pending/running work; `allow` permits overlap |
+Unchanged cron/zone preserves the next occurrence across startup registration. Changes start at the
+next future occurrence. Payload and policy updates apply to future jobs. After downtime, submit one
+saved occurrence and advance into the future. A schedule suppresses new occurrences while its own
+work remains pending/running, including automatic and manual retries. Each schedule has its own
+identity; different schedules for the same definition can run independently. A runner selecting
+the definition must be running to advance its schedules.
 
-`Schedule` exposes `id`, `name`, `key`, `payload`, `policy`, `cron`, `timeZone`, `missed`, `overlap`,
-`nextRunAt` and nullable `lastJobId`. Cleanup can remove the last referenced job.
-`schedules(definition, { limit? }?)` lists by key, default 100, maximum 1000.
-`unschedule(definition, key?)` returns whether it removed a producer; submitted jobs stay intact.
-Schedule writes and removals join caller transactions.
+`Schedule` exposes `id`, `name`, `key`, `payload`, `policy`, `cron`, `timeZone`, `nextRunAt` and nullable
+`lastJobId`. `schedules(def, { limit? }?)` lists by key (default 100, maximum 1000).
+`unschedule(def, key?)` removes the producer, leaving its jobs intact.
+`previewSchedule({ cron, timeZone? }, { from?, count? }?)` returns future Dates without a database
+(default from now, count 5, maximum 100). Calendar/DST behavior follows cron-parser.
 
-`previewSchedule({ cron, timeZone? }, { from?, count? }?)` returns Dates strictly after `from`
-(default now), without a database. Count defaults to 5 and accepts 1–100. Calendar/DST behavior follows
-cron-parser; the scheduler preserves the identity of its saved forward-calculated occurrence.
+## Installation and workers
 
-## Runner and installation
+`installJobs(pool)` installs the reserved schema explicitly, transactionally and safely across
+concurrent installers. The unreleased baseline is schema version 2, with no upgrade migrations.
+Installation is repeatable for that version. Stop old producers/runners and explicitly drop an older
+disposable `tenon_jobs` schema before reinstalling. Installation never erases it automatically.
 
-`installJobs(pool)` explicitly installs/upgrades the shared schema transactionally. Current schema
-version is 4. Run it before producers/consumers start. Runners require the current version.
+`runJobs(pool, definitions, options?)` runs until aborted or a database fault occurs. Supply an
+application-owned pgclear pool and at least one definition, without duplicate names. Only selected
+definitions are executed. Observe this promise and supervise failures. Abort through `signal`, then
+close the application pool after the runner settles. The runner never closes the pool.
 
-`runJobs(poolOrConnection, definitions, options?)` runs until aborted or a database fault occurs.
-Supply at least one definition with no duplicate names. Only selected names are executed.
-A supplied pgclear pool is borrowed; connection strings or `PoolOptions` create an owned pool.
+Each runner rotates successful claims between eligible definitions. Within a definition it selects
+oldest due work by execution time/UUID, skipping locked rows. An old backlog in one definition does
+not have to drain before another receives a turn. Fairness concerns admission to available local
+slots; it does not preempt active handlers or impose a distributed ordering between runners.
+Use per-definition concurrency limits or separate runners when long work must leave capacity for
+short, latency-sensitive work.
 
-| Runner option        | Default                                                       | Contract                                              |
-| -------------------- | ------------------------------------------------------------- | ----------------------------------------------------- |
-| `signal`             | None                                                          | Stop new claims and maintenance on abort              |
-| `concurrency`        | 1                                                             | Maximum unfinished local handlers; 1–1000             |
-| `notifications`      | Enabled for connection settings; disabled for a borrowed pool | Explicit listener connection settings, or false       |
-| `pollIntervalMs`     | 30000 with notifications, otherwise 1000                      | Reconciliation backstop                               |
-| `recoveryIntervalMs` | 1000                                                          | One recovery and schedule batch per interval          |
-| `leaseMs`            | 30000                                                         | Heartbeat lease; minimum 30 ms                        |
-| `shutdownTimeoutMs`  | 30000                                                         | Grace before active work is abandoned; zero permitted |
-| `databaseTimeoutMs`  | 10000                                                         | Bound driver operations and listener startup          |
+Worker concurrency is independent of pool size. Handlers normally run outside queue transactions,
+but their own SQL, application transactions, claims, renewals and maintenance share the pool.
+Keep transactions short and size/monitor the pool for that combined SQL workload. Pool waits spend
+lease and operation budgets; exhaustion can cancel a handler and lead to recovery/retry.
 
-Other millisecond options are positive 32-bit integers. For a borrowed pool, explicitly pass
-`notifications: connection` to enable its dedicated listener. The listener needs a direct/session-
-pooled connection; query traffic may use transaction pooling. App code closes a borrowed pool only
-after observing runner shutdown. See [reliability](storage-and-reliability.md) for cancellation limits.
+| Common runner option | Default            | Meaning                                                                      |
+| -------------------- | ------------------ | ---------------------------------------------------------------------------- |
+| `signal`             | None               | Stop claims and maintenance, allowing active work its shutdown grace         |
+| `concurrency`        | 1                  | Maximum unfinished handlers in this runner; 1–1000                           |
+| `notifications`      | None               | Optional dedicated listener connection string or pgclear connection settings |
+| `retentionMs`        | 604800000 (7 days) | Completed/cancelled history window; `false` retains it indefinitely          |
+
+The defaults suit ordinary use. Advanced timing controls exist for database latency and execution
+coordination: `pollIntervalMs` (1000, or 30000 with notifications), `recoveryIntervalMs` (1000),
+`leaseMs` (30000, minimum 30), `shutdownTimeoutMs` (30000, zero allowed), and `databaseTimeoutMs`
+(10000). These accept positive 32-bit integers unless noted. Retention accepts positive safe integer
+milliseconds, including windows longer than 24 days.
+
+The optional listener requires a direct/session-pooled connection; query traffic may use transaction
+pooling. Listener failure falls back to polling. Without listener settings, polling needs no additional
+connection configuration. See [reliability](storage-and-reliability.md) for lease and cancellation limits.
