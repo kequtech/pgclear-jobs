@@ -2,15 +2,18 @@
 
 ## 0.1.0 — Unreleased
 
+- Make pgclear a required peer, remove the Jobs-owned ORM adapter/dependency, and expose a typed transaction/executor integration factory over the same engine.
+- Export one canonical up/down SQL pair and provide a simple migrate command for installation or complete namespace removal; verify repeated setup and atomic migration rollback.
+- Rename the project, package and Kequtech source to pgclear-jobs; use the pgclear_jobs schema and PGCLEAR_JOBS environment/notification names for fresh disposable installations.
+- Document the pgclear-only engine, required driver peer, Tenon-owned Jobs facade, explicit feature enablement and generated application migration plan.
 - Preserve transaction rollback/release failures during cancellation, retaining the original handler error as a sanitized cause; cover lost rollback responses, SQL errors and lease expiry during completion lock waits.
-- Opt-in transactional handlers receive a pgclear or Tenon transaction that commits application writes, follow-up submissions and successful completion together; errors and lost ownership force rollback.
-- Exercise transactional retries, cancellation, heartbeat renewal, Tenon query guards and lost COMMIT responses without replaying application transactions.
+- Opt-in transactional handlers receive the native or integrated transaction scope that commits application writes, follow-up submissions and successful completion together; errors and lost ownership force rollback.
+- Exercise transactional retries, cancellation, heartbeat renewal and lost COMMIT responses without replaying application transactions.
 
 - Initial pgclear-backed job records and explicit schema installation.
 - Typed definitions, policy snapshots and outstanding-work keys.
 - Lookup, pending edits, rescheduling, cancellation and attempt inspection.
 - Independent runners, retries, heartbeats, fenced claims and recovery.
-- Optional Tenon transaction integration.
 - Notification-assisted dispatch, delayed-job timers and reconnect reconciliation.
 - Local slots remain occupied until timed-out or ownership-lost handlers settle.
 - One bounded recovery loop per runner, independent of execution slots.
@@ -27,17 +30,16 @@
 - Inspectable and cancellable blocked successors, atomic release on terminal transitions, and transactional notification wakeups.
 - Pending statistics distinguish ready, delayed and blocked work.
 - Consolidate unreleased schema history into a fresh installation baseline; incompatible disposable schemas require explicit reset.
-- Validate real TCP stalls and disconnects, uncertain pgclear/Tenon commits, stable-ID reconciliation, lease cancellation and lost completion responses without new runtime machinery.
+- Validate real TCP stalls and disconnects, uncertain pgclear commits, stable-ID reconciliation, lease cancellation and lost completion responses without new runtime machinery.
 - Simplify submission to independent/stable-ID send and keyed request; remove pending upsert and first-wins keyed send, including keyed bulk insertion.
 - Require application-owned worker pools and make notification listeners consistently opt-in.
 - Use one recurring schedule contract: one catch-up occurrence and suppression while outstanding work remains.
 - Enable retry jitter by default and omit undefined object fields during JSON payload serialization.
 - Automatically retain completed/cancelled history for seven days, with an extension/disable option; preserve failures and outstanding work.
-- Refresh the disposable schema baseline to version 2 and reject removed options instead of silently changing behavior.
-- Re-export the full API from the Tenon entry point so consumers need one library import path.
+- Reject removed options instead of silently changing behavior.
 - Rotate claims between eligible definitions, preserving oldest-due-first selection within each definition without new scheduling options.
 - Bound claim, next-due and retention scans by definition using existing indexes instead of sorting entire backlogs or scanning retained history.
 - Add reproducible sustained-load profiles and fairness/shared-pool exhaustion regressions without changing the public API.
 - Enforce schedule overlap suppression across manual retries and scheduler races with one unique outstanding-job index.
 - Exclude retained failures from automatic cleanup index scans; cover a failure-heavy history and both retry/scheduler insert orders.
-- Refresh the disposable schema baseline to version 3 for the revised indexes; document Site's retry-backoff and stalled-handler canary checks.
+- Document Site's retry-backoff and stalled-handler canary checks.

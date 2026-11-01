@@ -1,37 +1,43 @@
 # Architecture
 
-Tenon Jobs has three public concepts: a definition, a persisted record, and an explicit runner.
+This describes the pgclear-only engine. The [implementation plan](implementation-plan.md)
+tracks the future integration owned by Tenon ORM.
+
+pgclear-jobs has three public concepts: a definition, a persisted record, and an explicit runner.
 Definitions combine a typed handler with fixed execution policy. Record methods use the database
 scope supplied by the caller. Runners execute committed work independently.
 
 ## Boundaries
 
 ```text
-tenon-orm ────────────────→ pgclear
-tenon-jobs core ──────────→ pgclear
-tenon-jobs/tenon ─────────→ Tenon public queries + jobs core
+application ───────────→ pgclear pool
+pgclear-jobs ──────────→ pgclear (required peer)
+query-library adapter → pgclear-jobs/integration
 ```
 
-The core has no Tenon import or required peer. The optional integration uses Tenon's public `query`,
-`unsafeSql` and `createTenon`, including transaction lifetime checks; it never escapes through `db.native`.
-The `/tenon` entry point re-exports the full API, adapting `jobs` and transactional handler scopes. A packaged consumer test
-verifies core runtime and declarations without Tenon installed.
+There is no ORM import, dependency or ORM-specific entry point. A packaged consumer test verifies
+runtime and declarations with only the required driver peer and private runtime dependencies.
+`createJobsIntegration` binds a query library's executor, root pool and transaction opener to the
+same record and runner implementation. This boundary contains no registry or pool proxy.
 
-One reserved `tenon_jobs` schema holds jobs, attempts, schedules and schema version metadata across all
-definitions and processes. Schema changes belong to explicit `installJobs` deployment work.
+One reserved `pgclear_jobs` schema holds jobs, attempts, schedules and schema version metadata across all
+definitions and processes. Schema changes belong to explicit `installJobs`/`migrateJobs` deployment
+work or application migrations generated from the package's canonical up/down SQL.
 No DDL runs during submission. There is no mutable queue registry or implicit global database.
 
-| Module                   | Responsibility                                                     |
-| ------------------------ | ------------------------------------------------------------------ |
-| `definition.ts`          | Definitions, policy and lossless input validation                  |
-| `records.ts`             | Submission, inspection, pending mutations and explicit maintenance |
-| `storage.ts`             | Persisted/public records and precise cursors                       |
-| `claims.ts`              | Atomic ownership, heartbeats, outcomes and expired-claim recovery  |
-| `runner.ts`, `wakeup.ts` | Dispatch, cancellation, notifications and listener lifecycle       |
-| `schedules.ts`           | Calendar calculation and transactional recurring production        |
-| `retention.ts`           | Bounded automatic cleanup of completed/cancelled history           |
-| `schema.ts`              | Serialized baseline installation and keyed-request SQL             |
-| `tenon.ts`               | Adapting a supplied Tenon scope to the same record operations      |
+| Module                           | Responsibility                                                     |
+| -------------------------------- | ------------------------------------------------------------------ |
+| `definition.ts`                  | Definitions, policy and lossless input validation                  |
+| `records.ts`                     | Submission, inspection, pending mutations and explicit maintenance |
+| `storage.ts`                     | Persisted/public records and precise cursors                       |
+| `claims.ts`                      | Atomic ownership, heartbeats, outcomes and expired-claim recovery  |
+| `runner.ts`, `wakeup.ts`         | Dispatch, cancellation, notifications and listener lifecycle       |
+| `schedules.ts`                   | Calendar calculation and transactional recurring production        |
+| `retention.ts`                   | Bounded automatic cleanup of completed/cancelled history           |
+| `schema.ts`                      | Atomic schema installation/removal and runtime compatibility       |
+| `schema-sql.ts`, `migrations.ts` | One canonical schema and its exported up/down SQL                  |
+| `cli.ts`                         | Standalone migrate command                                         |
+| `integration.ts`, `pgclear.ts`   | Typed query/transaction binding and the native binding             |
 
 ## Execution
 
@@ -42,9 +48,9 @@ trigger releases successors; claims and wakeup timers select only unblocked work
 An app writes data and jobs in one transaction. After commit, a runner claims a due record in a short
 statement. Ordinary handlers use their own app transactions, followed by a separate fenced outcome.
 Opt-in transactional handlers receive a scope whose writes and successful completion commit together.
-Refused completion forces rollback; handler failure is recorded after rollback. The Tenon adapter
-borrows the runner's pgclear transaction through the public pool interface to construct a normal
-Tenon transaction client, preserving query policies without a second connection or private imports.
+Refused completion forces rollback; handler failure is recorded after rollback. An integration
+opens its own application's transaction API and supplies its executor for successful completion.
+The driver signal cancels that transaction independently of application JavaScript settlement.
 App results and domain idempotency belong in app records.
 
 A runner shares the app event loop or lives in a separately supervised process. It creates no threads.
@@ -61,10 +67,10 @@ The comparison below uses upstream pg-boss documentation reviewed on 1 November 
 requests pg-boss `^12.36.0`; current upstream examples may include newer behavior. A smaller exported
 API does not by itself make an application easier to operate.
 
-| Workflow                             | pg-boss                                                              | Tenon Jobs                                                                         |
+| Workflow                             | pg-boss                                                              | pgclear-jobs                                                                       |
 | ------------------------------------ | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
 | Ordinary work                        | Start one instance, create a named queue, then use `send` and `work` | Define a typed job, use `jobs(scope).send`, and select definitions in one runner   |
-| Application transaction              | Pass an ORM/transaction adapter in the operation's `db` option       | Use `jobs(tx)` through pgclear or the optional Tenon entry point                   |
+| Application transaction              | Pass an ORM/transaction adapter in the operation's `db` option       | Use `jobs(tx)` through pgclear or a query-library-owned integration                |
 | Atomic handler writes and completion | Opt into transactional workers                                       | Set `transactional: true` on a definition and use the supplied `tx`                |
 | Keyed latest-state work              | Choose a queue policy and combine it with keyed submission/upsert    | Use keyed `request`, with one head and one coalesced successor                     |
 | Recurring work                       | Register a cron schedule on the instance                             | Register a cron schedule through the existing record facade                        |
@@ -75,8 +81,8 @@ Sources: pg-boss [getting started](https://pgboss.io/),
 [adapters](https://pgboss.io/api/adapters), [queues](https://pgboss.io/api/queues), and
 [scheduling](https://pgboss.io/api/scheduling).
 
-pg-boss's ordinary path is already short. Our advantages are typed definitions and direct Tenon
-transaction scopes, plus a specific follow-up contract. Explicit runner supervision and shared-pool
+pg-boss's ordinary path is already short. Core advantages are typed definitions and a specific
+follow-up contract; Tenon integration belongs to the ORM. Explicit runner supervision and shared-pool
 lifecycle remain responsibilities for the application author. Automatic completed/cancelled retention removes a separate maintenance task.
 They should not be described as automatic simplification or a sufficient reason to migrate.
 

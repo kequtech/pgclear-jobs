@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createPool } from '@kequtech/pgclear';
 import { defineJob, runJobs } from '../src/index.js';
+import { createJobsIntegration } from '../src/integration.js';
 
 test('runner options validate before connecting and a pre-aborted runner opens no sessions', async () => {
   const pool = createPool({});
@@ -22,4 +23,24 @@ test('runner options validate before connecting and a pre-aborted runner opens n
   } finally {
     await pool.close();
   }
+});
+
+test('an integration is inert and a pre-aborted runner does not resolve its pool', async () => {
+  const unexpected = (): never => {
+    throw new Error('unexpected integration operation');
+  };
+  const api = createJobsIntegration<object, { readonly custom: true }>({
+    pool: unexpected,
+    execute: unexpected,
+    transaction: async () => unexpected(),
+  });
+  const def = api.defineJob({
+    name: 'inert',
+    transactional: true,
+    handler(_payload: number, { tx }) {
+      void tx.custom;
+    },
+  });
+  await api.runJobs({}, [def], { signal: AbortSignal.abort() });
+  await assert.rejects(api.runJobs({}, [def], { concurrency: 0 }), TypeError);
 });

@@ -17,7 +17,7 @@ async function failedOccurrence() {
 }
 
 async function due(id: string, at: string) {
-  await pool.queryClassic('UPDATE tenon_jobs.schedules SET next_run_at = $2 WHERE id = $1', [
+  await pool.queryClassic('UPDATE pgclear_jobs.schedules SET next_run_at = $2 WHERE id = $1', [
     id,
     at,
   ]);

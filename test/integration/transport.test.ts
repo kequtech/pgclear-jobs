@@ -2,9 +2,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
 import { createPool, DriverError } from '@kequtech/pgclear';
-import { createTenon, unsafeSql } from '@kequtech/tenon-orm';
 import { jobs, runJobs } from '../../src/index.js';
-import { jobs as tenonJobs } from '../../src/tenon.js';
 import { claimJob, finishClaim, recoverClaims } from '../../src/claims.js';
 import type { Claim } from '../../src/claims.js';
 import { connectionProxy } from '../helpers/connection-proxy.js';
@@ -20,7 +18,7 @@ const observe = (work: Promise<unknown>) =>
 async function expired(id: string) {
   await until(async () => {
     const { rows } = await pool.queryClassic<{ expired: boolean }>(
-      'SELECT lease_until <= clock_timestamp() AS expired FROM tenon_jobs.jobs WHERE id = $1',
+      'SELECT lease_until <= clock_timestamp() AS expired FROM pgclear_jobs.jobs WHERE id = $1',
       [id],
     );
     return rows[0]?.expired === true;
@@ -70,88 +68,76 @@ test('a lost autocommit response reconciles to one retained stable-ID job', with
   }
 });
 
-for (const adapter of ['pgclear', 'Tenon'] as const) {
-  for (const commitDelivered of [false, true]) {
-    test(
-      `${adapter} reconciles an uncertain transaction (COMMIT delivered: ${commitDelivered})`,
-      within,
-      async () => {
-        const def = definition();
-        const id = randomUUID();
-        // An application-owned table, outside the library's reserved schema.
-        const table = `public.${def.name.replaceAll('-', '_')}`;
-        const proxy = await connectionProxy(url);
-        const client = createPool({
-          ...proxy.connection,
-          maxConnections: 1,
-          applicationName: def.name,
+for (const commitDelivered of [false, true]) {
+  test(
+    `pgclear reconciles an uncertain transaction (COMMIT delivered: ${commitDelivered})`,
+    within,
+    async () => {
+      const def = definition();
+      const id = randomUUID();
+      // An application-owned table, outside the library's reserved schema.
+      const table = `public.${def.name.replaceAll('-', '_')}`;
+      const proxy = await connectionProxy(url);
+      const client = createPool({
+        ...proxy.connection,
+        maxConnections: 1,
+        applicationName: def.name,
+      });
+      let callbacks = 0;
+      const arm = () => {
+        proxy.hold(commitDelivered ? 'responses' : 'requests');
+      };
+      try {
+        await pool.queryClassic(
+          `CREATE TABLE ${table} (id uuid PRIMARY KEY, value integer NOT NULL)`,
+        );
+        const transaction = client.transaction(async (tx) => {
+          callbacks++;
+          await tx.queryClassic(`INSERT INTO ${table} VALUES ($1, 7)`, [id]);
+          await jobs(tx).send(def, 7, { id });
+          arm();
         });
-        const db = createTenon({ connection: client });
-        let callbacks = 0;
-        const arm = () => {
-          proxy.hold(commitDelivered ? 'responses' : 'requests');
-        };
-        try {
-          await pool.queryClassic(
-            `CREATE TABLE ${table} (id uuid PRIMARY KEY, value integer NOT NULL)`,
+        const outcome = observe(transaction);
+        await until(async () => proxy.buffered(commitDelivered ? 'responses' : 'requests') > 0);
+        if (commitDelivered) await until(async () => (await jobs(pool).get(id))?.payload === 7);
+        proxy.disconnect();
+        const error = await outcome;
+        assert.ok(error instanceof DriverError);
+        assert.equal(error.code, 'PGCLEAR_COMMIT_UNKNOWN');
+        assert.equal(error.outcome, 'unknown');
+        assert.equal(callbacks, 1); // The library must not replay the application transaction.
+        await until(async () => {
+          const { rows } = await pool.queryClassic<{ closed: boolean }>(
+            'SELECT NOT EXISTS (SELECT FROM pg_stat_activity WHERE application_name = $1) AS closed',
+            [def.name],
           );
-          const transaction =
-            adapter === 'pgclear'
-              ? client.transaction(async (tx) => {
-                  callbacks++;
-                  await tx.queryClassic(`INSERT INTO ${table} VALUES ($1, 7)`, [id]);
-                  await jobs(tx).send(def, 7, { id });
-                  arm();
-                })
-              : db.transaction(async (tx) => {
-                  callbacks++;
-                  await tx.query(unsafeSql(`INSERT INTO ${table} VALUES ($1, 7)`, [id]));
-                  await tenonJobs(tx).send(def, 7, { id });
-                  arm();
-                });
-          const outcome = observe(transaction);
-          await until(async () => proxy.buffered(commitDelivered ? 'responses' : 'requests') > 0);
-          if (commitDelivered) await until(async () => (await jobs(pool).get(id))?.payload === 7);
-          proxy.disconnect();
-          const error = await outcome;
-          assert.ok(error instanceof DriverError);
-          assert.equal(error.code, 'PGCLEAR_COMMIT_UNKNOWN');
-          assert.equal(error.outcome, 'unknown');
-          assert.equal(callbacks, 1); // The library must not replay the application transaction.
-          await until(async () => {
-            const { rows } = await pool.queryClassic<{ closed: boolean }>(
-              'SELECT NOT EXISTS (SELECT FROM pg_stat_activity WHERE application_name = $1) AS closed',
-              [def.name],
-            );
-            return rows[0]?.closed === true;
+          return rows[0]?.closed === true;
+        });
+        const app = await pool.queryClassic<{ value: number }>(
+          `SELECT value FROM ${table} WHERE id = $1`,
+          [id],
+        );
+        assert.equal(app.rows.length, commitDelivered ? 1 : 0);
+        assert.equal(app.rows[0]?.value ?? null, commitDelivered ? 7 : null);
+        assert.equal((await jobs(pool).get(id))?.payload ?? null, commitDelivered ? 7 : null);
+        proxy.release();
+        if (!commitDelivered) {
+          // Absence is authoritative only after the old session has ended and rolled back.
+          await pool.transaction(async (tx) => {
+            await tx.queryClassic(`INSERT INTO ${table} VALUES ($1, 7)`, [id]);
+            await jobs(tx).send(def, 7, { id });
           });
-          const app = await pool.queryClassic<{ value: number }>(
-            `SELECT value FROM ${table} WHERE id = $1`,
-            [id],
-          );
-          assert.equal(app.rows.length, commitDelivered ? 1 : 0);
-          assert.equal(app.rows[0]?.value ?? null, commitDelivered ? 7 : null);
-          assert.equal((await jobs(pool).get(id))?.payload ?? null, commitDelivered ? 7 : null);
-          proxy.release();
-          if (!commitDelivered) {
-            // Absence is authoritative only after the old session has ended and rolled back.
-            await pool.transaction(async (tx) => {
-              await tx.queryClassic(`INSERT INTO ${table} VALUES ($1, 7)`, [id]);
-              await jobs(tx).send(def, 7, { id });
-            });
-          }
-          assert.equal((await jobs(client).send(def, 99, { id })).payload, 7);
-          assert.equal((await pool.queryClassic(`SELECT * FROM ${table}`)).rows.length, 1);
-          assert.equal((await jobs(pool).stats(def)).total, 1);
-        } finally {
-          await proxy.close();
-          await db.close();
-          await client.close();
-          await pool.queryClassic(`DROP TABLE IF EXISTS ${table}`);
         }
-      },
-    );
-  }
+        assert.equal((await jobs(client).send(def, 99, { id })).payload, 7);
+        assert.equal((await pool.queryClassic(`SELECT * FROM ${table}`)).rows.length, 1);
+        assert.equal((await jobs(pool).stats(def)).total, 1);
+      } finally {
+        await proxy.close();
+        await client.close();
+        await pool.queryClassic(`DROP TABLE IF EXISTS ${table}`);
+      }
+    },
+  );
 }
 
 for (const partition of ['both directions', 'responses only'] as const) {
@@ -189,7 +175,7 @@ for (const partition of ['both directions', 'responses only'] as const) {
       await until(async () => signal !== undefined);
       await until(async () => client.stats.idle === 1 && client.stats.waiting === 0);
       const { rows } = await pool.queryClassic<{ record: Claim; lease: string }>(
-        'SELECT to_jsonb(j) AS record, to_jsonb(lease_until) AS lease FROM tenon_jobs.jobs j WHERE id = $1',
+        'SELECT to_jsonb(j) AS record, to_jsonb(lease_until) AS lease FROM pgclear_jobs.jobs j WHERE id = $1',
         [job.id],
       );
       const original = rows[0]!.record;
@@ -198,7 +184,7 @@ for (const partition of ['both directions', 'responses only'] as const) {
         // The DB renews ownership, but that renewal must not count until the worker receives it.
         await until(async () => {
           const renewed = await pool.queryClassic<{ extended: boolean }>(
-            'SELECT lease_until > $2::timestamptz AS extended FROM tenon_jobs.jobs WHERE id = $1',
+            'SELECT lease_until > $2::timestamptz AS extended FROM pgclear_jobs.jobs WHERE id = $1',
             [job.id, rows[0]!.lease],
           );
           return renewed.rows[0]?.extended === true;

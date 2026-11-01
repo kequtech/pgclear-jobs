@@ -12,6 +12,8 @@ import type { Execute } from './storage.js';
 import { settleOrAbort, Wakeup } from './wakeup.js';
 import { advanceSchedules } from './schedules.js';
 import { pruneCompleted } from './retention.js';
+import type { JobsIntegration } from './integration.js';
+import { pgclearIntegration } from './pgclear.js';
 
 export interface RunnerOptions {
   readonly signal?: AbortSignal;
@@ -41,11 +43,12 @@ async function pause(ms: number, signal: AbortSignal): Promise<void> {
   }
 }
 
-async function executeClaim(
-  pool: Pool,
+async function executeClaim<Database, Tx>(
+  database: Database,
+  integration: JobsIntegration<Database, Tx>,
   execute: Execute,
   claim: Claim,
-  definition: JobDefinition<unknown>,
+  definition: JobDefinition<unknown, Tx>,
   leaseMs: number,
   abandon: AbortSignal,
   requestedAt: number,
@@ -93,7 +96,8 @@ async function executeClaim(
     const failure = new Error('Transactional handler failed');
     let outcome: string | JobError | null = null;
     try {
-      await pool.transaction(
+      await integration.transaction(
+        database,
         async (tx) => {
           outcome = await invoke(() => definition.handler(claim.payload, { ...context, tx }));
           if (outcome !== null) {
@@ -101,15 +105,17 @@ async function executeClaim(
             throw failure;
           }
           signal.throwIfAborted();
-          if (
-            !(await finishClaim(
-              (text, values) => tx.queryClassic(text, values, { timeoutMs: databaseMs }),
-              claim,
-              null,
-            ))
-          ) {
-            controller.abort(new Error('Job claim lost'));
-            signal.throwIfAborted();
+          const completionTimer = setTimeout(
+            () => controller.abort(new DriverError('PGCLEAR_TIMEOUT', 'Job completion timed out.')),
+            databaseMs,
+          );
+          try {
+            if (!(await finishClaim(integration.execute(tx), claim, null))) {
+              controller.abort(new Error('Job claim lost'));
+              signal.throwIfAborted();
+            }
+          } finally {
+            clearTimeout(completionTimer);
           }
         },
         { signal },
@@ -169,7 +175,7 @@ async function executeClaim(
 
 function notificationWarning(error: unknown): void {
   process.emitWarning('Job notifications are unavailable; continuing with polling.', {
-    code: 'TENON_JOBS_NOTIFICATIONS_UNAVAILABLE',
+    code: 'PGCLEAR_JOBS_NOTIFICATIONS_UNAVAILABLE',
     detail: errorText(error),
   });
 }
@@ -180,8 +186,16 @@ export async function runJobs(
   definitions: readonly JobDefinition<unknown>[],
   options: RunnerOptions = {},
 ): Promise<void> {
-  if (!pool || typeof pool.queryClassic !== 'function' || typeof pool.transaction !== 'function')
-    throw new TypeError('runJobs requires an application-owned pgclear pool.');
+  return runJobsWithIntegration(pool, definitions, options, pgclearIntegration);
+}
+
+/** Shared engine; integrations own the application transaction API, never queue policy. */
+export async function runJobsWithIntegration<Database, Tx>(
+  database: Database,
+  definitions: readonly JobDefinition<unknown, Tx>[],
+  options: RunnerOptions,
+  integration: JobsIntegration<Database, Tx>,
+): Promise<void> {
   validateOptions(options, [
     'signal',
     'concurrency',
@@ -218,6 +232,9 @@ export async function runJobs(
     throw new TypeError('Supply at least one definition, with no duplicate names.');
   }
   if (options.signal?.aborted) return;
+  const pool = integration.pool(database);
+  if (!pool || typeof pool.queryClassic !== 'function' || typeof pool.transaction !== 'function')
+    throw new TypeError('runJobs requires an application-owned pgclear pool.');
   const names = [...byName.keys()];
   let nextDefinition = 0;
   const stop = new AbortController();
@@ -306,7 +323,8 @@ export async function runJobs(
           nextDefinition = (names.indexOf(claim.name) + 1) % names.length;
           counts.set(claim.name, (counts.get(claim.name) ?? 0) + 1);
           const task = executeClaim(
-            pool,
+            database,
+            integration,
             execute,
             claim,
             byName.get(claim.name)!,

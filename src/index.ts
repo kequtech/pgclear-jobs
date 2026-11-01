@@ -19,7 +19,7 @@ export type {
   PruneOptions,
   JobStats,
 } from './records.js';
-export { installJobs } from './schema.js';
+export { installJobs, migrateJobs } from './schema.js';
 export type { Job, JobState } from './storage.js';
 export { JobError, JobNotFoundError, JobStateError } from './errors.js';
 export type { JobErrorOptions } from './errors.js';

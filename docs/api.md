@@ -1,8 +1,8 @@
 # API
 
-Import from `@kequtech/tenon-jobs` for pgclear, or `/tenon` for Tenon. The Tenon entry point re-exports
-the full API and adapts `jobs` and transactional handler contexts for Tenon. No facade opens or commits a caller's
-transaction. Start with the [quick start](../README.md); this document covers the full contract.
+Import from `@kequtech/pgclear-jobs`. pgclear is a required peer dependency; the package contains no
+ORM adapter. No record facade opens or commits a caller's transaction. See the [integration API](integration.md)
+for other pgclear-backed query scopes and the [quick start](../README.md) for ordinary use.
 
 ## Definitions
 
@@ -49,10 +49,9 @@ payloads in application code; TypeScript does not validate previously stored JSO
 ### Transactional handlers
 
 Set `transactional: true` on a definition to receive `tx` alongside the ordinary handler context.
-For the core entry point, `tx` is a pgclear `Transaction`, including `query`, `queryClassic` and
-`savepoint`. For `/tenon`, it is a Tenon transaction `QueryClient`, including SQL tags, query return
-modes and affected-row checks. Use the matching entry point's `jobs(tx)` for transactional submissions.
-The runner and record methods accept definitions from either entry point.
+`tx` is a pgclear `Transaction`, including `query`, `queryClassic` and `savepoint`. Use `jobs(tx)`
+for transactional submissions. Definitions produced by an integration receive that integration's
+transaction type; its runner supplies that scope to the same execution engine.
 
 Claims commit before the handler transaction opens. Application writes through `tx`, follow-up
 submissions, successful attempt history and job completion then commit together. Handler exceptions
@@ -197,10 +196,15 @@ the definition must be running to advance its schedules.
 
 ## Installation and workers
 
-`installJobs(pool)` installs the reserved schema explicitly, transactionally and safely across
-concurrent installers. The unreleased baseline is schema version 3, with no upgrade migrations.
-Installation is repeatable for that version. Stop old producers/runners and explicitly drop an older
-disposable `tenon_jobs` schema before reinstalling. Installation never erases it automatically.
+`pgclear-jobs migrate` installs the reserved schema using `DATABASE_URL` from the environment or
+`.env`. Repeated installation preserves existing jobs. `pgclear-jobs migrate down` removes the
+entire namespace, including all Jobs data. Stop producers and workers before removal.
+
+The programmatic equivalents are `migrateJobs(pool)` and `migrateJobs(pool, 'down')`.
+`installJobs(pool)` is also available for programmatic installation. Each operation is atomic and
+serialized with other migrations. Workers check an internal compatibility marker and never run DDL.
+There is one schema definition, with no incremental history or version targeting.
+See [migrations](migrations.md) for extracting its up/down SQL.
 
 `runJobs(pool, definitions, options?)` runs until aborted or a database fault occurs. Supply an
 application-owned pgclear pool and at least one definition, without duplicate names. Only selected

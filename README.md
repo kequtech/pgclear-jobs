@@ -1,23 +1,32 @@
-# Tenon Jobs
+# pgclear-jobs
 
-Typed background jobs for PostgreSQL, built on [pgclear](https://github.com/kequtech/pgclear),
-with optional [Tenon ORM](https://github.com/kequtech/tenon-orm) integration.
+Typed background jobs for PostgreSQL, built on [pgclear](https://github.com/kequtech/pgclear).
+Install pgclear alongside this package; it is a required peer dependency.
 
 Requires Node.js 24+ and PostgreSQL 16+. Experimental and unpublished.
 Execution is **at least once**: handlers must tolerate repeated effects.
 
+The package contains no ORM dependency. The [integration API](docs/integration.md) lets another
+pgclear-backed query library supply its own transaction scopes to the same job engine. The
+[implementation plan](docs/implementation-plan.md) tracks the built-in Jobs API planned for Tenon ORM.
+
 ## Define, send, run
+
+Install storage once before starting the application. Set `DATABASE_URL` in the environment or `.env`:
+
+```sh
+npx pgclear-jobs migrate
+```
+
+An application can expose this as `"jobs:migrate": "pgclear-jobs migrate"` in its npm scripts.
 
 ```ts
 import { createPool } from '@kequtech/pgclear';
-import { defineJob, installJobs, jobs, runJobs } from '@kequtech/tenon-jobs';
+import { defineJob, jobs, runJobs } from '@kequtech/pgclear-jobs';
 
 const connection = process.env.DATABASE_URL;
 if (!connection) throw new Error('DATABASE_URL is required.');
 const pool = createPool(connection);
-
-// Run once during setup, before application producers and workers start.
-await installJobs(pool);
 
 const sendReceipt = defineJob({
   name: 'send-receipt',
@@ -48,20 +57,17 @@ and clean up completed/cancelled history after seven days. Failures remain avail
 
 ## Commit jobs with application writes
 
-The `/tenon` entry point exports the full API with `jobs` adapted for Tenon scopes:
+Use the transaction supplied by your pgclear pool:
 
 ```ts
-import { jobs } from '@kequtech/tenon-jobs/tenon';
-
-await db.transaction(async (tx) => {
+await pool.transaction(async (tx) => {
   const order = await saveOrder(tx, input);
   await jobs(tx).send(sendReceipt, { orderId: order.id });
 });
 ```
 
-The job commits or rolls back with the order. Core `jobs(pool)` and `jobs(tx)` use pgclear directly.
-Handlers execute independently of the submitting transaction. To share the application pool, create
-Tenon with `createTenon({ connection: pool })`. Tenon is optional for the core package.
+The job commits or rolls back with the order. Handlers execute independently of the submitting
+transaction. `saveOrder` represents application code using that same transaction.
 
 ## Commit handler writes with completion
 
@@ -69,8 +75,7 @@ Opt into `transactional: true` for short database handlers. The runner supplies 
 its writes and successful job completion together:
 
 ```ts
-import { defineJob } from '@kequtech/tenon-jobs/tenon';
-import { sql } from '@kequtech/tenon-orm';
+import { sql } from '@kequtech/pgclear';
 
 const markProjectReady = defineJob({
   name: 'mark-project-ready',
@@ -81,8 +86,7 @@ const markProjectReady = defineJob({
 });
 ```
 
-The core import supplies a pgclear `Transaction`; `/tenon` supplies a Tenon transaction query client.
-Both work with their entry point's `jobs(tx)` for follow-up submissions. Handler errors and lost
+The supplied `tx` is a pgclear `Transaction` and works with `jobs(tx)` for follow-up submissions. Handler errors and lost
 ownership roll back the transaction; failure/retry history is recorded separately. Calls through a
 separate `db` or pool and external effects remain outside it. Transactional handlers hold a connection
 until commit or rollback, so reserve pool capacity for claims, renewals and application traffic.
@@ -173,14 +177,16 @@ cp .env.example .env
 npm run check
 ```
 
-Tests require `TENON_JOBS_TEST_DATABASE_URL` ending in `_test`. The example reuses Tenon ORM's
-local test database; tests clean up their own definitions. CI checks PostgreSQL 16 and 18.
+Tests require `PGCLEAR_JOBS_TEST_DATABASE_URL` ending in `_test`. The example reuses an existing local
+test database. Migration tests intentionally exercise removal and reinstall of the Jobs schema;
+use a disposable test installation. CI checks PostgreSQL 16 and 18.
 
 Run `npm run test:load` for optional sustained-load measurements against the test database.
 The normal test suite includes deterministic fairness and pool-contention regressions.
 
-This unreleased library has a fresh schema baseline and no upgrade migrations. Explicitly drop an
-older disposable `tenon_jobs` schema before reinstalling; installation never erases it automatically.
+`pgclear-jobs migrate` installs the schema; `pgclear-jobs migrate down` intentionally removes it.
+The package exports one concrete up/down SQL pair for application migrations.
+See [schema migrations](docs/migrations.md).
 
 See [architecture](docs/architecture.md), [reliability](docs/storage-and-reliability.md), and
 [pending adoption checks](todo.md).

@@ -1,11 +1,8 @@
 import { createPool } from '@kequtech/pgclear';
-import type { QueryClient } from '@kequtech/tenon-orm';
 import { defineJob, jobs, runJobs } from '../src/index.js';
-import { sql as tenonSql } from '@kequtech/tenon-orm';
-import { defineJob as defineTenonJob, jobs as tenonJobs } from '../src/tenon.js';
 
 // Compile-time consumer contract; never executed.
-async function types(tx: QueryClient) {
+async function types() {
   const pool = createPool({});
   const a = defineJob({
     name: 'a',
@@ -29,19 +26,6 @@ async function types(tx: QueryClient) {
       });
     },
   });
-  const tenonTransactional = defineTenonJob({
-    name: 'tenon-transactional',
-    transactional: true,
-    async handler(payload: { id: string }, { tx }) {
-      const row = await tx.query(tenonSql<{ id: string }>`SELECT ${payload.id}::text AS id`, {
-        returns: 'one',
-      });
-      const id: string = row.id;
-      await tenonJobs(tx).send(a, { id });
-      // @ts-expect-error A Tenon handler receives the Tenon API, not a native driver scope.
-      await tx.queryClassic('SELECT 1');
-    },
-  });
   defineJob({
     name: 'ordinary',
     handler(_payload: number, context) {
@@ -50,10 +34,9 @@ async function types(tx: QueryClient) {
     },
   });
   await jobs(pool).send(transactional, { id: 'one' });
-  await tenonJobs(tx).send(tenonTransactional, { id: 'two' });
   // @ts-expect-error Transactional payload types remain bound to their definition.
   await jobs(pool).send(transactional, { id: 1 });
-  await runJobs(pool, [a, transactional, tenonTransactional]);
+  await runJobs(pool, [a, transactional]);
   const job = await jobs(pool).send(a, { id: '1' });
   const id: string = job.payload.id;
   void id;
@@ -61,7 +44,6 @@ async function types(tx: QueryClient) {
   await jobs(pool).send(a, { id: 3 });
   // @ts-expect-error Typed updates use the definition's payload.
   await jobs(pool).update(a, job.id, { id: false });
-  await tenonJobs(tx).send(a, { id: '1' });
   await jobs(pool).send(a, { id: '1' }, { id: '00000000-0000-0000-0000-000000000001' });
   // @ts-expect-error Stable IDs and outstanding keys have different lifetimes.
   await jobs(pool).send(a, { id: '1' }, { id: 'id', key: 'key' });
@@ -79,7 +61,6 @@ async function types(tx: QueryClient) {
   const blocker: string | null = requested.blockedBy;
   void requestedId;
   void blocker;
-  await tenonJobs(tx).request(a, { id: 'latest' }, { key: 'one', delayMs: 100 });
   // @ts-expect-error Requests require a key.
   await jobs(pool).request(a, { id: 'latest' }, {});
   // @ts-expect-error Requests cannot widen the definition's payload.
@@ -98,7 +79,6 @@ async function types(tx: QueryClient) {
   await jobs(pool).schedule(a, { id: '1' }, { cron: '* * * * *', missed: 'skip' });
   // @ts-expect-error Overlap is prevented by default, not a queue policy to select.
   await jobs(pool).schedule(a, { id: '1' }, { cron: '* * * * *', overlap: 'allow' });
-  await tenonJobs(tx).schedule(a, { id: '1' }, { cron: '* * * * *' });
   await runJobs(pool, [a, b]);
   // @ts-expect-error The application owns one pool for queue operations and execution.
   await runJobs('postgresql://localhost/example', [a, b]);

@@ -1,12 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createTenon } from '@kequtech/tenon-orm';
 import { defineJob, JobError, jobs, runJobs } from '../../src/index.js';
-import { jobs as tenonJobs } from '../../src/tenon.js';
 import { claimJob, finishClaim, recoverClaims } from '../../src/claims.js';
 import { advanceSchedules } from '../../src/schedules.js';
-import { definition, execute, pool, until, url } from '../helpers/database.js';
+import { definition, execute, pool, until } from '../helpers/database.js';
 
 test('one retry policy provides exponential backoff, a cap and the same behavior on recovery', async () => {
   const def = definition({ maxAttempts: 6, retryDelayMs: 20, retryMaxDelayMs: 50 });
@@ -22,7 +20,7 @@ test('one retry policy provides exponential backoff, a cap and the same behavior
   const { claim } = await claimJob(execute, [def.name], 30000);
   assert.ok(claim);
   await pool.queryClassic(
-    "UPDATE tenon_jobs.jobs SET lease_until = clock_timestamp() - interval '1 second' WHERE id = $1",
+    "UPDATE pgclear_jobs.jobs SET lease_until = clock_timestamp() - interval '1 second' WHERE id = $1",
     [row.id],
   );
   await recoverClaims(execute);
@@ -158,7 +156,7 @@ test('per-definition concurrency holds its own slots without blocking other defi
 
 async function due(id: string): Promise<void> {
   await pool.queryClassic(
-    "UPDATE tenon_jobs.schedules SET next_run_at = '2000-01-01T00:00:00Z' WHERE id = $1",
+    "UPDATE pgclear_jobs.schedules SET next_run_at = '2000-01-01T00:00:00Z' WHERE id = $1",
     [id],
   );
 }
@@ -178,7 +176,7 @@ test('schedule registration is idempotent and preserves its cursor across unchan
   assert.equal(await jobs(pool).unschedule(def, 'regular'), false);
 });
 
-test('schedule operations join pgclear and Tenon application transactions', async () => {
+test('schedule operations join application transactions', async () => {
   const def = definition();
   await assert.rejects(
     pool.transaction(async (tx) => {
@@ -188,21 +186,16 @@ test('schedule operations join pgclear and Tenon application transactions', asyn
     }),
     /rollback/,
   );
-  const db = createTenon({ connection: url });
-  try {
-    await db.transaction((tx) => tenonJobs(tx).schedule(def, 2, { cron: '* * * * *' }));
-    assert.equal((await jobs(pool).schedules(def))[0]?.payload, 2);
-    await assert.rejects(
-      db.transaction(async (tx) => {
-        await tenonJobs(tx).unschedule(def);
-        throw new Error('rollback');
-      }),
-      /rollback/,
-    );
-    assert.equal((await jobs(pool).schedules(def)).length, 1);
-  } finally {
-    await db.close();
-  }
+  await pool.transaction((tx) => jobs(tx).schedule(def, 2, { cron: '* * * * *' }));
+  assert.equal((await jobs(pool).schedules(def))[0]?.payload, 2);
+  await assert.rejects(
+    pool.transaction(async (tx) => {
+      await jobs(tx).unschedule(def);
+      throw new Error('rollback');
+    }),
+    /rollback/,
+  );
+  assert.equal((await jobs(pool).schedules(def)).length, 1);
 });
 
 test('competing schedule passes create one occurrence and retain its identity after completion', async () => {
@@ -228,7 +221,7 @@ test('schedules skip outstanding work and resume after it terminates', async () 
   const schedule = await jobs(pool).schedule(def, 42, { cron: '* * * * *' });
   const old = await jobs(pool).send(def, 41);
   await pool.queryClassic(
-    "UPDATE tenon_jobs.jobs SET schedule_id = $2, scheduled_for = '1999-01-01T00:00:00Z' WHERE id = $1",
+    "UPDATE pgclear_jobs.jobs SET schedule_id = $2, scheduled_for = '1999-01-01T00:00:00Z' WHERE id = $1",
     [old.id, schedule.id],
   );
   await due(schedule.id);

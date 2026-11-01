@@ -18,7 +18,7 @@ test(
     const newer = await jobs(pool).send(busy, 2, { runAt: new Date(1) });
     const ready = await jobs(pool).send(quiet, 3);
     await pool.transaction(async (tx) => {
-      await tx.queryClassic('SELECT id FROM tenon_jobs.jobs WHERE name = $1 FOR UPDATE', [
+      await tx.queryClassic('SELECT id FROM pgclear_jobs.jobs WHERE name = $1 FOR UPDATE', [
         busy.name,
       ]);
       const { claim } = await claimJob(
@@ -156,7 +156,7 @@ test(
       assert.equal(calls.size, 240);
       for (const [value, count] of calls) assert.equal(count, value % 17 === 0 ? 2 : 1);
       const { rows } = await pool.queryClassic<{ expired: number }>(
-        `SELECT count(*)::integer AS expired FROM tenon_jobs.attempts a JOIN tenon_jobs.jobs j ON j.id = a.job_id
+        `SELECT count(*)::integer AS expired FROM pgclear_jobs.attempts a JOIN pgclear_jobs.jobs j ON j.id = a.job_id
        WHERE j.name = $1 AND a.outcome = 'expired'`,
         [def.name],
       );
@@ -214,7 +214,7 @@ test(
       assert.equal((signal!.reason as Error).message, 'Job lease expired');
       await until(async () => {
         const { rows } = await pool.queryClassic<{ expired: boolean }>(
-          'SELECT lease_until <= clock_timestamp() AS expired FROM tenon_jobs.jobs WHERE id = $1',
+          'SELECT lease_until <= clock_timestamp() AS expired FROM pgclear_jobs.jobs WHERE id = $1',
           [first.id],
         );
         return rows[0]!.expired;

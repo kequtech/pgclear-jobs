@@ -1,13 +1,20 @@
 # Pending work
 
+## Package boundary and ORM integration
+
+The package is pgclear-only with a required driver peer, a typed integration factory and one
+up/down SQL pair. Follow the remaining [implementation plan](docs/implementation-plan.md) in Tenon
+ORM: transaction cancellation options, the built-in Jobs facade with direct worker lifecycle forwarding, disabled-feature behavior, and
+generation of application up/down SQL migrations when Jobs is explicitly enabled.
+
 ## Before a wider app migration
 
 - [ ] Trial one repeatable maintenance job in an existing app alongside pg-boss. Exercise startup,
       scheduling, supervision, rollback, failure inspection, manual retry and shutdown with the app's
       real connection setup. Blockparty hourly cleanup is a suitable first candidate.
 - [ ] Validate app payload compatibility across mixed app versions before adoption. Schema checks run
-      only at runner startup. This unreleased library has a fresh baseline with no upgrade migrations;
-      design an upgrade path when installed data first needs to be retained.
+      only at runner startup. One up/down SQL pair is exported; validate a real application's
+      rollout and code/schema compatibility, including any intentional down/up data loss.
 
 ## Implementation review
 
@@ -23,8 +30,9 @@ No further generic queue feature is required before that review. App review shou
 - Queue cutover stops old producers/schedulers and drains or explicitly transfers outstanding old work,
   including delayed jobs and retries, before the replacement can execute the same workflow.
 
-A real-app canary is still required before wider adoption. Schema resets are only for disposable
-installations; add a data-preserving schema/rollout path before the first upgrade that must retain work.
+A private development integration is required before publication; a production canary remains a
+separate step before wider adoption. Any deliberate schema reset must account for loss of queued
+work and history; saved application migration files remain immutable.
 
 ## Cases to assess when an app needs them
 

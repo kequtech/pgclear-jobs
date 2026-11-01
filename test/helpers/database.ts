@@ -6,9 +6,9 @@ import { defineJob, installJobs } from '../../src/index.js';
 import type { JobOptions } from '../../src/index.js';
 import type { Execute } from '../../src/storage.js';
 
-const configured = process.env.TENON_JOBS_TEST_DATABASE_URL;
+const configured = process.env.PGCLEAR_JOBS_TEST_DATABASE_URL;
 if (!configured || !new URL(configured).pathname.endsWith('_test')) {
-  throw new Error('Set TENON_JOBS_TEST_DATABASE_URL to a dedicated database ending in _test.');
+  throw new Error('Set PGCLEAR_JOBS_TEST_DATABASE_URL to a dedicated database ending in _test.');
 }
 export const url = configured;
 export const pool = createPool({ connectionString: url, maxConnections: 12 });
@@ -41,11 +41,11 @@ before(async () => {
 after(async () => {
   try {
     await pool.queryClassic(
-      'DELETE FROM tenon_jobs.schedules WHERE name IN (SELECT jsonb_array_elements_text($1::jsonb))',
+      'DELETE FROM pgclear_jobs.schedules WHERE name IN (SELECT jsonb_array_elements_text($1::jsonb))',
       [JSON.stringify(names)],
     );
     await pool.queryClassic(
-      'DELETE FROM tenon_jobs.jobs WHERE name IN (SELECT jsonb_array_elements_text($1::jsonb))',
+      'DELETE FROM pgclear_jobs.jobs WHERE name IN (SELECT jsonb_array_elements_text($1::jsonb))',
       [JSON.stringify(names)],
     );
   } finally {

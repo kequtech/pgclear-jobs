@@ -1,12 +1,10 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
-import { createTenon } from '@kequtech/tenon-orm';
 import { defineJob, jobs, JobNotFoundError, JobStateError } from '../../src/index.js';
-import { jobs as tenonJobs } from '../../src/tenon.js';
 import { claimJob, finishClaim } from '../../src/claims.js';
 import { advanceSchedules } from '../../src/schedules.js';
-import { definition, execute, pool, url } from '../helpers/database.js';
+import { definition, execute, pool } from '../helpers/database.js';
 
 test('stable submission IDs preserve the first job across completion and concurrent retries', async () => {
   const def = definition();
@@ -70,28 +68,23 @@ test('bulk submission skips duplicate IDs and preserves null JSON payloads', asy
   });
 });
 
-test('batch submission and keyed requests join the supplied Tenon transaction', async () => {
+test('batch submission and keyed requests join the supplied transaction', async () => {
   const def = definition();
-  const db = createTenon({ connection: url });
-  try {
-    await assert.rejects(
-      db.transaction(async (tx) => {
-        const scope = tenonJobs(tx);
-        await scope.sendMany(def, [{ payload: 1 }, { payload: 2 }]);
-        await scope.request(def, 3, { key: 'pending' });
-        await scope.request(def, 4, { key: 'pending', delayMs: 1000 });
-        assert.equal((await scope.stats(def)).pending, 3);
-        assert.equal((await jobs(pool).find(def)).length, 0);
-        throw new Error('rollback');
-      }),
-      /rollback/,
-    );
-    assert.equal((await jobs(pool).find(def)).length, 0);
-    await db.transaction((tx) => tenonJobs(tx).sendMany(def, [{ payload: 5 }, { payload: 6 }]));
-    assert.equal((await jobs(pool).find(def)).length, 2);
-  } finally {
-    await db.close();
-  }
+  await assert.rejects(
+    pool.transaction(async (tx) => {
+      const scope = jobs(tx);
+      await scope.sendMany(def, [{ payload: 1 }, { payload: 2 }]);
+      await scope.request(def, 3, { key: 'pending' });
+      await scope.request(def, 4, { key: 'pending', delayMs: 1000 });
+      assert.equal((await scope.stats(def)).pending, 3);
+      assert.equal((await jobs(pool).find(def)).length, 0);
+      throw new Error('rollback');
+    }),
+    /rollback/,
+  );
+  assert.equal((await jobs(pool).find(def)).length, 0);
+  await pool.transaction((tx) => jobs(tx).sendMany(def, [{ payload: 5 }, { payload: 6 }]));
+  assert.equal((await jobs(pool).find(def)).length, 2);
 });
 
 test('explicit pending edits preserve a retry job policy, budget and history', async () => {
@@ -140,7 +133,7 @@ test('retrying a scheduled failure preserves occurrence context and overlap prot
   const def = definition({ maxAttempts: 1 });
   const schedule = await jobs(pool).schedule(def, 1, { cron: '* * * * *' });
   await pool.queryClassic(
-    "UPDATE tenon_jobs.schedules SET next_run_at = '2000-01-01' WHERE id = $1",
+    "UPDATE pgclear_jobs.schedules SET next_run_at = '2000-01-01' WHERE id = $1",
     [schedule.id],
   );
   await advanceSchedules(pool, [def.name], 5000);
@@ -150,7 +143,7 @@ test('retrying a scheduled failure preserves occurrence context and overlap prot
   assert.equal(retry.scheduleId, schedule.id);
   assert.deepEqual(retry.scheduledFor, original.scheduledFor);
   await pool.queryClassic(
-    "UPDATE tenon_jobs.schedules SET next_run_at = '2000-01-02' WHERE id = $1",
+    "UPDATE pgclear_jobs.schedules SET next_run_at = '2000-01-02' WHERE id = $1",
     [schedule.id],
   );
   assert.equal(await advanceSchedules(pool, [def.name], 5000), 0);
@@ -165,7 +158,7 @@ test('cursor pagination retains microseconds and works after the cursor row is r
   );
   for (const [i, job] of inserted.entries()) {
     await pool.queryClassic(
-      "UPDATE tenon_jobs.jobs SET created_at = '2026-01-01T00:00:00Z'::timestamptz + $2 * interval '100 microseconds' WHERE id = $1",
+      "UPDATE pgclear_jobs.jobs SET created_at = '2026-01-01T00:00:00Z'::timestamptz + $2 * interval '100 microseconds' WHERE id = $1",
       [job.id, i],
     );
   }
@@ -206,12 +199,12 @@ test('pruning is bounded, skips locked rows, preserves failed jobs by default an
   await finishClaim(execute, (await claimJob(execute, [def.name], 30000)).claim!, 'failure');
   const pending = await jobs(pool).send(def, 4);
   await pool.queryClassic(
-    "UPDATE tenon_jobs.jobs SET finished_at = '1999-01-01' WHERE name = $1 AND state <> 'pending'",
+    "UPDATE pgclear_jobs.jobs SET finished_at = '1999-01-01' WHERE name = $1 AND state <> 'pending'",
     [def.name],
   );
   const before = new Date('2000-01-01');
   await pool.transaction(async (tx) => {
-    await tx.queryClassic('SELECT id FROM tenon_jobs.jobs WHERE id = $1 FOR UPDATE', [
+    await tx.queryClassic('SELECT id FROM pgclear_jobs.jobs WHERE id = $1 FOR UPDATE', [
       completed.id,
     ]);
     assert.equal(await jobs(pool).prune(def, { before, limit: 1 }), 1);

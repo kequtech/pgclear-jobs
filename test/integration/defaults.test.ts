@@ -1,9 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
-import { createTenon } from '@kequtech/tenon-orm';
-import { jobs, runJobs } from '../../src/index.js';
-import { defineJob, jobs as tenonJobs, runJobs as runTenonJobs } from '../../src/tenon.js';
+import { defineJob, jobs, runJobs } from '../../src/index.js';
 import { claimJob, finishClaim } from '../../src/claims.js';
 import { pruneCompleted } from '../../src/retention.js';
 import type { JobDefinition } from '../../src/definition.js';
@@ -22,13 +20,13 @@ async function terminal(
     await finishClaim(execute, current, outcome === 'failed' ? 'permanent' : null);
   }
   await pool.queryClassic(
-    "UPDATE tenon_jobs.jobs SET finished_at = clock_timestamp() - $2::double precision * interval '1 day' WHERE id = $1",
+    "UPDATE pgclear_jobs.jobs SET finished_at = clock_timestamp() - $2::double precision * interval '1 day' WHERE id = $1",
     [job.id, daysOld],
   );
   return job.id;
 }
 
-test('the Tenon entry point runs transactional events, keyed requests and cron work with default workers', async () => {
+test('the native entry point runs transactional events, keyed requests and cron work with default workers', async () => {
   const handled: { value: number; attempt: number }[] = [];
   const def = defineJob({
     name: definition().name,
@@ -38,19 +36,18 @@ test('the Tenon entry point runs transactional events, keyed requests and cron w
       if (value === 1 && attempt === 1) throw new Error('retry once');
     },
   });
-  const db = createTenon({ connection: pool });
-  await db.transaction(async (tx) => {
-    await tenonJobs(tx).send(def, 1);
-    await tenonJobs(tx).request(def, 2, { key: 'entity' });
-    await tenonJobs(tx).request(def, 3, { key: 'entity' });
+  await pool.transaction(async (tx) => {
+    await jobs(tx).send(def, 1);
+    await jobs(tx).request(def, 2, { key: 'entity' });
+    await jobs(tx).request(def, 3, { key: 'entity' });
   });
-  const schedule = await tenonJobs(db).schedule(def, 4, { cron: '* * * * *' });
+  const schedule = await jobs(pool).schedule(def, 4, { cron: '* * * * *' });
   await pool.queryClassic(
-    "UPDATE tenon_jobs.schedules SET next_run_at = '2000-01-01' WHERE id = $1",
+    "UPDATE pgclear_jobs.schedules SET next_run_at = '2000-01-01' WHERE id = $1",
     [schedule.id],
   );
   const stop = new AbortController();
-  const running = runTenonJobs(pool, [def], { signal: stop.signal });
+  const running = runJobs(pool, [def], { signal: stop.signal });
   try {
     await until(async () => (await jobs(pool).stats(def)).completed === 3);
     assert.deepEqual(
@@ -67,7 +64,6 @@ test('the Tenon entry point runs transactional events, keyed requests and cron w
   } finally {
     stop.abort();
     await running;
-    await db.close();
   }
 });
 
@@ -134,11 +130,13 @@ test('automatic retention is bounded, skips locks and coordinates competing clea
     Array.from({ length: 203 }, () => ({ payload: 1 })),
   );
   await pool.queryClassic(
-    "UPDATE tenon_jobs.jobs SET state = 'completed', finished_at = clock_timestamp() - interval '10 days' WHERE name = $1",
+    "UPDATE pgclear_jobs.jobs SET state = 'completed', finished_at = clock_timestamp() - interval '10 days' WHERE name = $1",
     [def.name],
   );
   await pool.transaction(async (tx) => {
-    await tx.queryClassic('SELECT id FROM tenon_jobs.jobs WHERE id = $1 FOR UPDATE', [rows[0]!.id]);
+    await tx.queryClassic('SELECT id FROM pgclear_jobs.jobs WHERE id = $1 FOR UPDATE', [
+      rows[0]!.id,
+    ]);
     const counts = await Promise.all([
       pruneCompleted(execute, [def.name], 7 * 86_400_000),
       pruneCompleted(execute, [def.name], 7 * 86_400_000),
@@ -157,12 +155,12 @@ test('automatic retention avoids scanning substantial retained failure history',
   const recent = await terminal(def, 'completed', 1);
   const policy = (await jobs(pool).get(completed))!.policy;
   await pool.queryClassic(
-    `INSERT INTO tenon_jobs.jobs (id, name, payload, policy, state, finished_at)
+    `INSERT INTO pgclear_jobs.jobs (id, name, payload, policy, state, finished_at)
      SELECT md5($1 || n::text)::uuid, $1, '1'::jsonb, $2::jsonb, 'failed',
        clock_timestamp() - interval '30 days' FROM generate_series(1, 20000) AS n`,
     [def.name, JSON.stringify(policy)],
   );
-  await pool.queryClassic('ANALYZE tenon_jobs.jobs');
+  await pool.queryClassic('ANALYZE pgclear_jobs.jobs');
   // Inspect actual work, not elapsed time or a particular planner/index choice.
   interface Plan {
     readonly 'Rows Removed by Filter'?: number;
@@ -202,7 +200,7 @@ test('stable-ID reconciliation works within the automatic retention window and e
   await finishClaim(execute, (await claimJob(execute, [def.name], 30_000)).claim!, null);
   assert.equal((await jobs(pool).send(def, 2, { id })).payload, 1);
   await pool.queryClassic(
-    "UPDATE tenon_jobs.jobs SET finished_at = clock_timestamp() - interval '10 days' WHERE id = $1",
+    "UPDATE pgclear_jobs.jobs SET finished_at = clock_timestamp() - interval '10 days' WHERE id = $1",
     [id],
   );
   const stop = new AbortController();

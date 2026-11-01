@@ -2,12 +2,13 @@
 
 ## Ownership and lifecycle
 
-The app owns persistence. `installJobs` creates the reserved `tenon_jobs` schema in one transaction,
-serialized by an advisory transaction lock. The unreleased baseline has no upgrade migrations.
-Existing compatible installations are left intact; incompatible ones are rejected without deletion.
-Stop old producers/runners and explicitly drop an older disposable schema before reinstalling.
-Producers never install storage; runners check compatibility at startup.
-Do not manually add or modify objects in this reserved schema.
+The app owns persistence. `pgclear-jobs migrate` installs the reserved `pgclear_jobs` schema in one
+transaction, serialized by an advisory transaction lock. Repeated installation leaves current storage
+intact. `pgclear-jobs migrate down` intentionally removes the entire namespace and all Jobs data.
+Stop producers and workers before removal. A breaking schema change can use an explicit down/up reset;
+there is no incremental migration engine. Application migration tools can extract the same up/down SQL.
+An internal schema marker lets workers reject incompatible storage. Producers never install storage;
+runners only check compatibility at startup. Do not add application objects to this reserved schema.
 
 ```text
 pending → running → completed
@@ -23,8 +24,8 @@ caller's transaction without owning it. Commits expose jobs and notifications to
 expose neither. A facade retains its scope and obeys its lifetime. Keep app transactions short.
 
 Definitions may opt into `transactional: true`. Claims still commit separately before execution.
-The runner then opens a pgclear transaction and supplies it as `tx` (a Tenon query client through
-`/tenon`). Application writes, follow-up submissions, successful attempt history and completion commit
+The runner opens a pgclear transaction and supplies it as `tx`; an integration can supply its own
+pgclear-backed transaction API. Application writes, follow-up submissions, successful attempt history and completion commit
 together. A failed completion fence or handler exception rolls back application writes; handler
 failure/retry bookkeeping is recorded afterward using the ordinary fenced statement. Native driver
 cancellation expires and rolls back the transaction even when JavaScript ignores the abort signal,
@@ -98,7 +99,7 @@ observes the terminal record and does not execute that completed job again.
 
 These boundaries have integration tests through a test-only plaintext TCP relay against PostgreSQL:
 held requests, held responses, disconnected sockets, both outcomes of an uncertain COMMIT through
-pgclear and Tenon, stable-ID reconciliation, lease cancellation, stale tokens and lost completion
+native and integrated query scopes, stable-ID reconciliation, lease cancellation, stale tokens and lost completion
 responses. A separate healthy connection observes real commit/rollback and lease state. The tests
 add no runtime dependency or public API. They do not simulate TLS negotiation failures, database
 failover or kernel-level packet retransmission; those remain deployment-specific checks.
@@ -149,7 +150,7 @@ The claim and next-due calculation share a snapshot, closing a separate-query ti
 With notifications, fallback reconciliation defaults to 30 seconds. Without them it defaults to one
 second. Initial listener failures retry each second; pgclear reconnects an established listener.
 Reconnection triggers reconciliation. While a listener is unavailable, fallback is capped at one second
-and a Node warning uses code `TENON_JOBS_NOTIFICATIONS_UNAVAILABLE`. LISTEN needs a dedicated direct
+and a Node warning uses code `PGCLEAR_JOBS_NOTIFICATIONS_UNAVAILABLE`. LISTEN needs a dedicated direct
 or session-pooled connection; a query pool may use transaction pooling.
 
 Schedules are durable producers, not a second executor. A pass locks at most 50 due schedules for its
@@ -236,11 +237,11 @@ Reproduce against a dedicated database ending in `_test`:
 
 ```sh
 npm run test:load
-TENON_JOBS_LOAD_DURATION_MS=60000 TENON_JOBS_LOAD_INTERVAL_MS=150 npm run test:load
+PGCLEAR_JOBS_LOAD_DURATION_MS=60000 PGCLEAR_JOBS_LOAD_INTERVAL_MS=150 npm run test:load
 ```
 
 The default phase is 10 seconds with a 50 ms interval; each batch contains 11 jobs. Set
-`TENON_JOBS_LOAD_OUTPUT` to save JSON. Setup, drain and cleanup add time beyond the production phase.
+`PGCLEAR_JOBS_LOAD_OUTPUT` to save JSON. Setup, drain and cleanup add time beyond the production phase.
 Only the generated load-test definitions are deleted afterward. `npm test` runs smaller behavioral
 regressions for fairness, oldest-due ordering, lock skipping, shared-pool load and total pool exhaustion.
 
@@ -256,6 +257,6 @@ not just the number of handlers, and runner failure/shutdown must join the app's
 A real-app maintenance canary and one-workflow-at-a-time cutover remain the adoption checks. Stop
 old producers/schedulers and drain or explicitly transfer delayed/retrying/active old work before
 both systems can execute the same workflow. App payload compatibility must be considered across
-versions. This unused library still has a disposable schema baseline; once work must be retained,
-schema changes require a preserving migration and a tested rollout, not a reset. Database failover,
+versions. A severe schema change may use an explicit down/up reset, intentionally losing queued
+work and history. Saved application migration files remain immutable. Database failover,
 TLS/network topology and app effects remain checks for the target deployment.

@@ -83,7 +83,7 @@ function record<Payload>(row: StoredSchedule): Schedule<Payload> {
 
 export async function saveSchedule<Payload>(
   execute: Execute,
-  definition: JobDefinition<Payload>,
+  definition: JobDefinition<Payload, never>,
   payload: NoInfer<Payload>,
   options: ScheduleOptions,
 ): Promise<Schedule<Payload>> {
@@ -95,7 +95,7 @@ export async function saveSchedule<Payload>(
   const clock = await execute<{ now: string }>('SELECT to_jsonb(clock_timestamp()) AS now');
   const next = previewSchedule(options, { from: new Date(clock.rows[0]!.now), count: 1 })[0]!;
   const { rows } = await execute<{ record: StoredSchedule }>(
-    `INSERT INTO tenon_jobs.schedules AS s (id, name, key, payload, policy, cron, time_zone, next_run_at)
+    `INSERT INTO pgclear_jobs.schedules AS s (id, name, key, payload, policy, cron, time_zone, next_run_at)
      VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8::timestamptz)
      ON CONFLICT (name, key) DO UPDATE SET payload = excluded.payload, policy = excluded.policy,
        next_run_at = CASE WHEN (s.cron, s.time_zone) IS DISTINCT FROM (excluded.cron, excluded.time_zone)
@@ -118,11 +118,11 @@ export async function saveSchedule<Payload>(
 
 export async function listSchedules<Payload>(
   execute: Execute,
-  definition: JobDefinition<Payload>,
+  definition: JobDefinition<Payload, never>,
   limit: number,
 ): Promise<readonly Schedule<Payload>[]> {
   const { rows } = await execute<{ record: StoredSchedule }>(
-    'SELECT to_jsonb(s) AS record FROM tenon_jobs.schedules s WHERE name = $1 ORDER BY key LIMIT $2',
+    'SELECT to_jsonb(s) AS record FROM pgclear_jobs.schedules s WHERE name = $1 ORDER BY key LIMIT $2',
     [definition.name, integer(limit, 'limit', 1, 1000)],
   );
   return rows.map(({ record: row }) => record<Payload>(row));
@@ -135,7 +135,7 @@ export async function advanceSchedules(
   timeoutMs: number,
 ): Promise<number> {
   const due = await pool.queryClassic<{ due: boolean }>(
-    `SELECT EXISTS (SELECT FROM tenon_jobs.schedules WHERE next_run_at <= statement_timestamp()
+    `SELECT EXISTS (SELECT FROM pgclear_jobs.schedules WHERE next_run_at <= statement_timestamp()
       AND name IN (SELECT jsonb_array_elements_text($1::jsonb))) AS due`,
     [JSON.stringify(names)],
     { timeoutMs },
@@ -145,7 +145,7 @@ export async function advanceSchedules(
     async (tx) => {
       let created = 0;
       const { rows } = await tx.queryClassic<{ record: StoredSchedule; now: string }>(
-        `SELECT to_jsonb(s) AS record, to_jsonb(statement_timestamp()) AS now FROM tenon_jobs.schedules s
+        `SELECT to_jsonb(s) AS record, to_jsonb(statement_timestamp()) AS now FROM pgclear_jobs.schedules s
        WHERE name IN (SELECT jsonb_array_elements_text($1::jsonb)) AND next_run_at <= statement_timestamp()
        ORDER BY next_run_at, id LIMIT 50 FOR UPDATE SKIP LOCKED`,
         [JSON.stringify(names)],
@@ -156,9 +156,9 @@ export async function advanceSchedules(
         const occurred = new Date(schedule.next_run_at);
         const next = previewSchedule(options, { from: clock, count: 1 })[0]!;
         const inserted = await tx.queryClassic<{ id: string }>(
-          `INSERT INTO tenon_jobs.jobs (id, name, payload, policy, schedule_id, scheduled_for)
+          `INSERT INTO pgclear_jobs.jobs (id, name, payload, policy, schedule_id, scheduled_for)
            SELECT $1::uuid, $2, $3::jsonb, $4::jsonb, $5::uuid, $6::timestamptz
-           WHERE NOT EXISTS (SELECT FROM tenon_jobs.jobs
+           WHERE NOT EXISTS (SELECT FROM pgclear_jobs.jobs
              WHERE schedule_id = $5::uuid AND state IN ('pending', 'running'))
            ON CONFLICT DO NOTHING RETURNING id`,
           [
@@ -173,7 +173,7 @@ export async function advanceSchedules(
         const jobId = inserted.rows[0]?.id ?? null;
         if (jobId) created++;
         await tx.queryClassic(
-          `UPDATE tenon_jobs.schedules SET next_run_at = $2::timestamptz,
+          `UPDATE pgclear_jobs.schedules SET next_run_at = $2::timestamptz,
         last_job_id = COALESCE($3::uuid, last_job_id) WHERE id = $1::uuid`,
           [schedule.id, next.toISOString(), jobId],
         );

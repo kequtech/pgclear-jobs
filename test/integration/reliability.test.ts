@@ -33,7 +33,7 @@ for (const operation of ['complete', 'renew'] as const) {
       const job = await jobs(pool).send(def, 1);
       const claim = (await claimJob(execute, [def.name], 30_000)).claim!;
       await pool.queryClassic(
-        `UPDATE tenon_jobs.jobs SET ${expiry} = clock_timestamp() + interval '500 milliseconds' WHERE id = $1`,
+        `UPDATE pgclear_jobs.jobs SET ${expiry} = clock_timestamp() + interval '500 milliseconds' WHERE id = $1`,
         [job.id],
       );
       const session = await pool.acquire();
@@ -41,7 +41,7 @@ for (const operation of ['complete', 'renew'] as const) {
       let pending: Promise<boolean> | undefined;
       try {
         await pool.transaction(async (tx) => {
-          await tx.queryClassic('SELECT id FROM tenon_jobs.jobs WHERE id = $1 FOR UPDATE', [
+          await tx.queryClassic('SELECT id FROM pgclear_jobs.jobs WHERE id = $1 FOR UPDATE', [
             job.id,
           ]);
           pending =
@@ -57,7 +57,7 @@ for (const operation of ['complete', 'renew'] as const) {
           });
           await until(async () => {
             const result = await pool.queryClassic<{ expired: boolean }>(
-              `SELECT ${expiry} <= clock_timestamp() AS expired FROM tenon_jobs.jobs WHERE id = $1`,
+              `SELECT ${expiry} <= clock_timestamp() AS expired FROM pgclear_jobs.jobs WHERE id = $1`,
               [job.id],
             );
             return result.rows[0]?.expired === true;

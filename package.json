@@ -1,5 +1,5 @@
 {
-  "name": "@kequtech/tenon-jobs",
+  "name": "@kequtech/pgclear-jobs",
   "version": "0.1.0",
   "description": "Durable PostgreSQL jobs with typed definitions and explicit database scopes",
   "type": "module",
@@ -9,20 +9,27 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kequtech/tenon-jobs.git"
+    "url": "git+https://github.com/kequtech/pgclear-jobs.git"
   },
-  "homepage": "https://github.com/kequtech/tenon-jobs#readme",
+  "homepage": "https://github.com/kequtech/pgclear-jobs#readme",
   "bugs": {
-    "url": "https://github.com/kequtech/tenon-jobs/issues"
+    "url": "https://github.com/kequtech/pgclear-jobs/issues"
+  },
+  "bin": {
+    "pgclear-jobs": "./dist/cli.js"
   },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
-    "./tenon": {
-      "types": "./dist/tenon.d.ts",
-      "import": "./dist/tenon.js"
+    "./integration": {
+      "types": "./dist/integration.d.ts",
+      "import": "./dist/integration.js"
+    },
+    "./migrations": {
+      "types": "./dist/migrations.d.ts",
+      "import": "./dist/migrations.js"
     }
   },
   "files": [
@@ -33,6 +40,7 @@
     "CHANGELOG.md"
   ],
   "scripts": {
+    "jobs:migrate": "npm run build && node dist/cli.js migrate",
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
     "test:compile": "node scripts/build.mjs --test",
@@ -46,28 +54,22 @@
     "prepack": "npm run build"
   },
   "dependencies": {
-    "@kequtech/pgclear": "^0.3.3",
     "cron-parser": "^5.10.3"
   },
   "peerDependencies": {
-    "@kequtech/tenon-orm": "^0.4.5"
-  },
-  "peerDependenciesMeta": {
-    "@kequtech/tenon-orm": {
-      "optional": true
-    }
+    "@kequtech/pgclear": "^0.3.3"
   },
   "devDependencies": {
-    "@kequtech/tenon-orm": "^0.4.5",
     "@types/node": "^24.19.2",
     "prettier": "^3.9.10",
-    "typescript": "~6.0.2"
+    "typescript": "~6.0.2",
+    "@kequtech/pgclear": "^0.3.3"
   },
   "prettier": {
     "singleQuote": true,
     "printWidth": 100
   },
   "kequtech": {
-    "source": "tenon-jobs"
+    "source": "pgclear-jobs"
   }
 }

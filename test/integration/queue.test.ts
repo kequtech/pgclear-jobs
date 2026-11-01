@@ -5,9 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { once } from 'node:events';
 import test from 'node:test';
 import { createPool, listen } from '@kequtech/pgclear';
-import { createTenon, unsafeSql } from '@kequtech/tenon-orm';
 import { installJobs, jobs, JobNotFoundError, JobStateError, runJobs } from '../../src/index.js';
-import { jobs as tenonJobs } from '../../src/tenon.js';
 import { claimJob as fetchJob, finishClaim, recoverClaims, renewClaim } from '../../src/claims.js';
 import type { Execute } from '../../src/storage.js';
 import { notificationChannel } from '../../src/schema.js';
@@ -20,7 +18,7 @@ async function claimJob(execute: Execute, names: readonly string[], leaseMs: num
 test('installation is repeatable and safe across concurrent installers', async () => {
   await Promise.all([installJobs(pool), installJobs(pool), installJobs(pool)]);
   const result = await pool.queryClassic<{ count: string }>(
-    'SELECT count(*)::text AS count FROM tenon_jobs.schema_version',
+    'SELECT count(*)::text AS count FROM pgclear_jobs.schema_version',
   );
   assert.equal(result.rows[0]?.count, '1');
 });
@@ -43,31 +41,15 @@ test('pgclear scope insertion commits or rolls back with application data', asyn
   assert.equal((await jobs(pool).get(committed.id))?.payload, 2);
 });
 
-test('Tenon integration joins its transaction and expires with its scope', async () => {
-  const db = createTenon({ connection: url });
+test('a record facade expires with its supplied transaction', async () => {
   const def = definition();
-  let rolledBack = '';
-  let expired: ReturnType<typeof tenonJobs> | undefined;
-  try {
-    await assert.rejects(
-      db.transaction(async (tx) => {
-        await tx.query(unsafeSql('CREATE TEMP TABLE app_example (id integer) ON COMMIT DROP', []));
-        await tx.query(unsafeSql('INSERT INTO app_example VALUES (1)', []));
-        rolledBack = (await tenonJobs(tx).send(def, 3)).id;
-        throw new Error('rollback');
-      }),
-      /rollback/,
-    );
-    assert.equal(await jobs(pool).get(rolledBack), null);
-    const committed = await db.transaction(async (tx) => {
-      expired = tenonJobs(tx);
-      return expired.send(def, 4);
-    });
-    assert.equal((await jobs(pool).get(committed.id))?.payload, 4);
-    await assert.rejects(expired!.send(def, 5));
-  } finally {
-    await db.close();
-  }
+  let expired: ReturnType<typeof jobs> | undefined;
+  const committed = await pool.transaction(async (tx) => {
+    expired = jobs(tx);
+    return expired.send(def, 4);
+  });
+  assert.equal((await jobs(pool).get(committed.id))?.payload, 4);
+  await assert.rejects(expired!.send(def, 5));
 });
 
 test('events remain independent while keyed requests keep the latest pending payload', async () => {
@@ -234,7 +216,7 @@ test('expired claims recover with a fresh token and reject stale outcomes and re
   const first = await claimJob(execute, [def.name], 30000);
   assert.ok(first);
   await pool.queryClassic(
-    "UPDATE tenon_jobs.jobs SET lease_until = clock_timestamp() - interval '1 second' WHERE id = $1",
+    "UPDATE pgclear_jobs.jobs SET lease_until = clock_timestamp() - interval '1 second' WHERE id = $1",
     [row.id],
   );
   assert.equal(await finishClaim(execute, first, null), false);
@@ -273,7 +255,7 @@ test('heartbeats extend a live claim while its handler remains active', async ()
   });
   async function leaseTime(): Promise<number> {
     const result = await pool.queryClassic<{ lease: string | null }>(
-      'SELECT to_jsonb(lease_until) AS lease FROM tenon_jobs.jobs WHERE id = $1',
+      'SELECT to_jsonb(lease_until) AS lease FROM pgclear_jobs.jobs WHERE id = $1',
       [row.id],
     );
     return result.rows[0]?.lease ? new Date(result.rows[0].lease).getTime() : 0;
@@ -372,7 +354,7 @@ test('a killed worker process leaves a recoverable claim', async () => {
   const def = definition();
   const row = await jobs(pool).send(def, 1);
   const child = fork(new URL('../fixtures/worker.js', import.meta.url), [def.name], {
-    env: { ...process.env, TENON_JOBS_TEST_DATABASE_URL: url },
+    env: { ...process.env, PGCLEAR_JOBS_TEST_DATABASE_URL: url },
     stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
   });
   const exited = once(child, 'exit');
@@ -433,7 +415,7 @@ async function listenerPid(applicationName: string): Promise<number | undefined>
 
 const quietRunner = { pollIntervalMs: 30_000, recoveryIntervalMs: 30_000, shutdownTimeoutMs: 20 };
 
-test('notifications commit with pgclear and Tenon operations and ignore keyed no-op updates', async () => {
+test('notifications commit with transactional operations and ignore keyed no-op updates', async () => {
   const def = definition();
   const received: string[] = [];
   const id = randomUUID();
@@ -443,7 +425,6 @@ test('notifications commit with pgclear and Tenon operations and ignore keyed no
       if (payload === def.name) received.push(payload);
     },
   });
-  const db = createTenon({ connection: url });
   try {
     await assert.rejects(
       pool.transaction(async (tx) => {
@@ -454,8 +435,8 @@ test('notifications commit with pgclear and Tenon operations and ignore keyed no
       }),
       /rollback/,
     );
-    await db.transaction(async (tx) => {
-      await tenonJobs(tx).send(def, 2, { id });
+    await pool.transaction(async (tx) => {
+      await jobs(tx).send(def, 2, { id });
       await delay(30);
       assert.equal(received.length, 0);
     });
@@ -468,7 +449,6 @@ test('notifications commit with pgclear and Tenon operations and ignore keyed no
     await until(async () => received.length === 2);
   } finally {
     await listener.close();
-    await db.close();
   }
 });
 
@@ -511,7 +491,7 @@ for (const loss of ['timeout', 'lease loss'] as const) {
       await until(async () => started === 1);
       if (loss === 'lease loss') {
         await pool.queryClassic(
-          "UPDATE tenon_jobs.jobs SET lease_until = clock_timestamp() - interval '1 second' WHERE id = $1",
+          "UPDATE pgclear_jobs.jobs SET lease_until = clock_timestamp() - interval '1 second' WHERE id = $1",
           [first.id],
         );
       }
@@ -603,7 +583,7 @@ test('fallback polling discovers work after an unnotified row-lock release', asy
   let running: Promise<void> | undefined;
   try {
     await pool.transaction(async (tx) => {
-      await tx.queryClassic('SELECT id FROM tenon_jobs.jobs WHERE id = $1 FOR UPDATE', [row.id]);
+      await tx.queryClassic('SELECT id FROM pgclear_jobs.jobs WHERE id = $1 FOR UPDATE', [row.id]);
       running = runJobs(pool, [def], {
         ...quietRunner,
         signal: stop.signal,

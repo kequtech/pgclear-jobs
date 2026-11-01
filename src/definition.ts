@@ -42,7 +42,7 @@ export type JobOptions<Payload, Tx = Transaction> = DefinitionOptions &
       }
   );
 
-export type JobDefinition<Payload> = JobOptions<Payload> & ExecutionPolicy;
+export type JobDefinition<Payload, Tx = Transaction> = JobOptions<Payload, Tx> & ExecutionPolicy;
 
 export function integer(value: number, name: string, min = 1, max = 2_147_483_647): number {
   if (!Number.isSafeInteger(value) || value < min || value > max) {
@@ -75,31 +75,37 @@ export function uuid(value: unknown): string {
   return value.toLowerCase();
 }
 
-export function defineJob<Payload>(
-  options: Extract<JobOptions<Payload>, { transactional: true }>,
-): Extract<JobDefinition<Payload>, { transactional: true }>;
-export function defineJob<Payload>(
-  options: Extract<JobOptions<Payload>, { transactional?: false }>,
-): Extract<JobDefinition<Payload>, { transactional?: false }>;
-export function defineJob<Payload>(options: JobOptions<Payload>): JobDefinition<Payload>;
-export function defineJob<Payload>(options: JobOptions<Payload>): JobDefinition<Payload> {
-  if (typeof options.name !== 'string' || !options.name.trim() || options.name.length > 200) {
-    throw new TypeError('Job name must contain 1–200 characters and cannot be blank.');
+/** Bind only the handler transaction type; definitions remain inert. */
+export function definitionFactory<Tx>() {
+  function defineJob<Payload>(
+    options: Extract<JobOptions<Payload, Tx>, { transactional: true }>,
+  ): Extract<JobDefinition<Payload, Tx>, { transactional: true }>;
+  function defineJob<Payload>(
+    options: Extract<JobOptions<Payload, Tx>, { transactional?: false }>,
+  ): Extract<JobDefinition<Payload, Tx>, { transactional?: false }>;
+  function defineJob<Payload>(options: JobOptions<Payload, Tx>): JobDefinition<Payload, Tx>;
+  function defineJob<Payload>(options: JobOptions<Payload, Tx>): JobDefinition<Payload, Tx> {
+    if (typeof options.name !== 'string' || !options.name.trim() || options.name.length > 200) {
+      throw new TypeError('Job name must contain 1–200 characters and cannot be blank.');
+    }
+    if (typeof options.handler !== 'function') throw new TypeError('A job handler is required.');
+    if (options.transactional !== undefined && typeof options.transactional !== 'boolean')
+      throw new TypeError('transactional must be boolean.');
+    return Object.freeze({
+      name: databaseText(options.name, 'Job name'),
+      ...(options.transactional
+        ? { transactional: true as const, handler: options.handler }
+        : { handler: options.handler }),
+      ...executionPolicy(options),
+      ...(options.concurrency === undefined
+        ? {}
+        : { concurrency: integer(options.concurrency, 'concurrency', 1, 1000) }),
+    });
   }
-  if (typeof options.handler !== 'function') throw new TypeError('A job handler is required.');
-  if (options.transactional !== undefined && typeof options.transactional !== 'boolean')
-    throw new TypeError('transactional must be boolean.');
-  return Object.freeze({
-    name: databaseText(options.name, 'Job name'),
-    ...(options.transactional
-      ? { transactional: true as const, handler: options.handler }
-      : { handler: options.handler }),
-    ...executionPolicy(options),
-    ...(options.concurrency === undefined
-      ? {}
-      : { concurrency: integer(options.concurrency, 'concurrency', 1, 1000) }),
-  });
+  return defineJob;
 }
+
+export const defineJob = definitionFactory<Transaction>();
 
 /** Select only persisted execution policy. */
 export function executionPolicy(options: Partial<ExecutionPolicy>): ExecutionPolicy {

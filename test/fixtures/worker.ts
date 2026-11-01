@@ -1,7 +1,7 @@
 import { createPool } from '@kequtech/pgclear';
 import { defineJob, runJobs } from '../../src/index.js';
 
-const pool = createPool({ connectionString: process.env.TENON_JOBS_TEST_DATABASE_URL! });
+const pool = createPool({ connectionString: process.env.PGCLEAR_JOBS_TEST_DATABASE_URL! });
 const definition = defineJob({
   name: process.argv[2]!,
   retryDelayMs: 0,

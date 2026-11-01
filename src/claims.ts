@@ -35,25 +35,25 @@ export async function claimJob(
       SELECT name, position FROM jsonb_array_elements_text($1::jsonb) WITH ORDINALITY AS d(name, position)
     ), candidate AS (
       SELECT due.id FROM selected d CROSS JOIN LATERAL (
-        SELECT id FROM tenon_jobs.jobs WHERE name = d.name
+        SELECT id FROM pgclear_jobs.jobs WHERE name = d.name
           AND state = 'pending' AND blocked_by IS NULL AND run_at <= statement_timestamp()
         ORDER BY run_at, id LIMIT 1 FOR UPDATE SKIP LOCKED
       ) due ORDER BY d.position LIMIT 1
     ), claimed AS (
-      UPDATE tenon_jobs.jobs j SET state = 'running', claim_token = $2::uuid,
+      UPDATE pgclear_jobs.jobs j SET state = 'running', claim_token = $2::uuid,
         attempt_count = attempt_count + 1, updated_at = clock_timestamp(),
         deadline = clock_timestamp() + (policy->>'executionTimeoutMs')::double precision * interval '1 millisecond',
         lease_until = clock_timestamp() + LEAST($3::double precision,
           (policy->>'executionTimeoutMs')::double precision) * interval '1 millisecond'
       FROM candidate c WHERE j.id = c.id RETURNING j.*
     ), history AS (
-      INSERT INTO tenon_jobs.attempts (job_id, number, token)
+      INSERT INTO pgclear_jobs.attempts (job_id, number, token)
       SELECT id, attempt_count, claim_token FROM claimed
     ) SELECT (SELECT to_jsonb(c) FROM claimed c) AS record,
       CASE WHEN EXISTS (SELECT FROM claimed) THEN NULL ELSE (
         SELECT ceil(extract(epoch FROM (min(run_at) - clock_timestamp())) * 1000)::double precision
         FROM selected d CROSS JOIN LATERAL (
-          SELECT run_at FROM tenon_jobs.jobs WHERE name = d.name
+          SELECT run_at FROM pgclear_jobs.jobs WHERE name = d.name
             AND state = 'pending' AND blocked_by IS NULL AND run_at > statement_timestamp()
           ORDER BY run_at, id LIMIT 1
         ) future
@@ -72,9 +72,9 @@ export async function renewClaim(
   // PostgreSQL to re-evaluate predicates already checked on the target row.
   const { rows } = await execute<{ id: string }>(
     `WITH owned AS MATERIALIZED (
-       SELECT id, lease_until, deadline FROM tenon_jobs.jobs
+       SELECT id, lease_until, deadline FROM pgclear_jobs.jobs
        WHERE id = $1::uuid AND claim_token = $2::uuid AND state = 'running' FOR UPDATE
-     ) UPDATE tenon_jobs.jobs j SET lease_until = LEAST(owned.deadline,
+     ) UPDATE pgclear_jobs.jobs j SET lease_until = LEAST(owned.deadline,
        clock_timestamp() + $3::double precision * interval '1 millisecond')
      FROM owned WHERE j.id = owned.id
        AND owned.lease_until > clock_timestamp() AND owned.deadline > clock_timestamp() RETURNING j.id`,
@@ -91,10 +91,10 @@ export async function finishClaim(
 ): Promise<boolean> {
   const { rows } = await execute<{ id: string }>(
     `WITH owned AS MATERIALIZED (
-      SELECT id, lease_until, deadline FROM tenon_jobs.jobs
+      SELECT id, lease_until, deadline FROM pgclear_jobs.jobs
       WHERE id = $1::uuid AND claim_token = $2::uuid AND state = 'running' FOR UPDATE
     ), finished AS (
-      UPDATE tenon_jobs.jobs j SET ${outcomeUpdate(
+      UPDATE pgclear_jobs.jobs j SET ${outcomeUpdate(
         '$3::text IS NULL',
         `$4 AND ${remainingAttempts}`,
         '$3',
@@ -104,7 +104,7 @@ export async function finishClaim(
         AND owned.lease_until > clock_timestamp() AND ($3::text IS NOT NULL OR owned.deadline > clock_timestamp())
       RETURNING j.id
     ), history AS (
-      UPDATE tenon_jobs.attempts SET finished_at = clock_timestamp(), error = $3,
+      UPDATE pgclear_jobs.attempts SET finished_at = clock_timestamp(), error = $3,
         outcome = CASE WHEN $3::text IS NULL THEN 'completed' ELSE 'failed' END
       WHERE token = $2::uuid AND job_id IN (SELECT id FROM finished)
     ) SELECT id FROM finished`,
@@ -123,14 +123,14 @@ export async function finishClaim(
 export async function recoverClaims(execute: Execute, limit = 100): Promise<number> {
   const { rows } = await execute<{ id: string }>(
     `WITH expired AS (
-      SELECT id, claim_token FROM tenon_jobs.jobs
+      SELECT id, claim_token FROM pgclear_jobs.jobs
       WHERE state = 'running' AND lease_until <= clock_timestamp()
       ORDER BY lease_until, id LIMIT $1 FOR UPDATE SKIP LOCKED
     ), recovered AS (
-      UPDATE tenon_jobs.jobs j SET ${outcomeUpdate('false', remainingAttempts, "'Attempt lease expired'")}
+      UPDATE pgclear_jobs.jobs j SET ${outcomeUpdate('false', remainingAttempts, "'Attempt lease expired'")}
       FROM expired e WHERE j.id = e.id RETURNING j.id
     ), history AS (
-      UPDATE tenon_jobs.attempts SET outcome = 'expired', error = 'Attempt lease expired',
+      UPDATE pgclear_jobs.attempts SET outcome = 'expired', error = 'Attempt lease expired',
         finished_at = clock_timestamp()
       WHERE token IN (SELECT claim_token FROM expired) AND job_id IN (SELECT id FROM recovered)
     ) SELECT id FROM recovered`,

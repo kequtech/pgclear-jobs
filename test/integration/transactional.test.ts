@@ -2,17 +2,33 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 import { createPool, DatabaseError, DriverError } from '@kequtech/pgclear';
-import type { InputValue, Transaction, TransactionOptions } from '@kequtech/pgclear';
-import { AffectedRowsError, sql as tenonSql, unsafeSql } from '@kequtech/tenon-orm';
+import type { Pool, Transaction, TransactionOptions } from '@kequtech/pgclear';
 import { defineJob, jobs, JobError, runJobs } from '../../src/index.js';
 import type { HandlerContext, JobDefinition, JobRecords } from '../../src/index.js';
-import { defineJob as tenonDefinition, jobs as tenonJobs } from '../../src/tenon.js';
+import type { RunnerOptions } from '../../src/index.js';
+import { createJobsIntegration } from '../../src/integration.js';
 import { claimJob, finishClaim, recoverClaims } from '../../src/claims.js';
 import type { Execute } from '../../src/storage.js';
 import { definition, execute, pool, until, url } from '../helpers/database.js';
 import { connectionProxy } from '../helpers/connection-proxy.js';
 
-type Adapter = 'pgclear' | 'Tenon';
+type Adapter = 'pgclear' | 'integration';
+interface Scope {
+  readonly execute: Execute;
+}
+interface Database extends Scope {
+  readonly pool: Pool;
+}
+const integrated = createJobsIntegration<Database, Scope>({
+  pool: (database) => database.pool,
+  execute: (scope) => scope.execute,
+  transaction: (database, work, options) =>
+    database.pool.transaction(
+      (tx) => work({ execute: (sql, values) => tx.queryClassic(sql, values) }),
+      options,
+    ),
+});
+const runners = new Map<string, (client: Pool, options: RunnerOptions) => Promise<void>>();
 interface Context extends HandlerContext {
   readonly query: Execute;
   readonly records: JobRecords;
@@ -30,29 +46,36 @@ function transactional(
     transactional: true as const,
     ...options,
   };
-  return adapter === 'pgclear'
-    ? defineJob({
-        ...settings,
-        handler: (payload: number, context) =>
-          work(payload, {
-            ...context,
-            query: (sql, values) => context.tx.queryClassic(sql, values),
-            records: jobs(context.tx),
-          }),
-      })
-    : tenonDefinition({
-        ...settings,
-        handler: (payload: number, context) =>
-          work(payload, {
-            ...context,
-            query: async <Row extends object>(
-              sql: string,
-              values: readonly InputValue[] = [],
-            ): Promise<{ readonly rows: readonly Row[] }> =>
-              await context.tx.query<Row>(unsafeSql<Row>(sql, values)),
-            records: tenonJobs(context.tx),
-          }),
-      });
+  if (adapter === 'pgclear') {
+    const def = defineJob({
+      ...settings,
+      handler: (payload: number, context) =>
+        work(payload, {
+          ...context,
+          query: (sql, values) => context.tx.queryClassic(sql, values),
+          records: jobs(context.tx),
+        }),
+    });
+    runners.set(def.name, (client, options) => runJobs(client, [def], options));
+    return def;
+  }
+  const def = integrated.defineJob({
+    ...settings,
+    handler: (payload: number, context) =>
+      work(payload, {
+        ...context,
+        query: context.tx.execute,
+        records: integrated.jobs(context.tx),
+      }),
+  });
+  runners.set(def.name, (client, options) =>
+    integrated.runJobs(
+      { pool: client, execute: (sql, values) => client.queryClassic(sql, values) },
+      [def],
+      options,
+    ),
+  );
+  return def;
 }
 
 async function table(t: TestContext) {
@@ -62,9 +85,9 @@ async function table(t: TestContext) {
   return name;
 }
 
-function start(def: JobDefinition<number>, options: Parameters<typeof runJobs>[2] = {}) {
+function start(def: JobDefinition<number, never>, options: Parameters<typeof runJobs>[2] = {}) {
   const stop = new AbortController();
-  const running = runJobs(pool, [def], {
+  const running = runners.get(def.name)!(pool, {
     signal: stop.signal,
     pollIntervalMs: 10,
     recoveryIntervalMs: 20,
@@ -75,7 +98,7 @@ function start(def: JobDefinition<number>, options: Parameters<typeof runJobs>[2
   return { stop, running };
 }
 
-for (const adapter of ['pgclear', 'Tenon'] as const) {
+for (const adapter of ['pgclear', 'integration'] as const) {
   test(`${adapter} handler writes, follow-up submission and completion commit together`, async (t) => {
     const app = await table(t);
     const child = definition();
@@ -201,7 +224,7 @@ for (const adapter of ['pgclear', 'Tenon'] as const) {
     try {
       await until(async () => written);
       await pool.queryClassic(
-        "UPDATE tenon_jobs.jobs SET lease_until = clock_timestamp() - interval '1 second' WHERE id = $1",
+        "UPDATE pgclear_jobs.jobs SET lease_until = clock_timestamp() - interval '1 second' WHERE id = $1",
         [job.id],
       );
       assert.equal(await recoverClaims(execute), 1);
@@ -236,12 +259,14 @@ for (const adapter of ['pgclear', 'Tenon'] as const) {
       await release.promise;
     });
     const job = await jobs(pool).send(def, 1);
-    const { stop, running } = start(def, { leaseMs: 1000 });
+    // Allow clock/scheduling jitter while still holding the handler beyond its original lease.
+    const leaseMs = 3000;
+    const { stop, running } = start(def, { leaseMs });
     try {
       await until(async () => written);
       const initial = (
         await pool.queryClassic<{ lease: string }>(
-          'SELECT to_jsonb(lease_until) AS lease FROM tenon_jobs.jobs WHERE id = $1',
+          'SELECT to_jsonb(lease_until) AS lease FROM pgclear_jobs.jobs WHERE id = $1',
           [job.id],
         )
       ).rows[0]!.lease;
@@ -250,11 +275,14 @@ for (const adapter of ['pgclear', 'Tenon'] as const) {
           state: string;
           attempt_count: number;
           renewed: boolean;
+          last_error: string | null;
+          lease_until: string | null;
+          observed_at: string;
         }>(
-          "SELECT state, attempt_count, lease_until > $2::timestamptz + interval '1 second' AS renewed FROM tenon_jobs.jobs WHERE id = $1",
-          [job.id, initial],
+          "SELECT state, attempt_count, last_error, to_jsonb(lease_until) AS lease_until, to_jsonb(clock_timestamp()) AS observed_at, lease_until > $2::timestamptz + $3::double precision * interval '1 millisecond' AS renewed FROM pgclear_jobs.jobs WHERE id = $1",
+          [job.id, initial, leaseMs],
         );
-        assert.equal(rows[0]!.state, 'running');
+        assert.equal(rows[0]!.state, 'running', JSON.stringify({ initial, ...rows[0] }));
         assert.equal(rows[0]!.attempt_count, 1);
         return rows[0]!.renewed;
       });
@@ -287,7 +315,7 @@ for (const adapter of ['pgclear', 'Tenon'] as const) {
     try {
       await until(async () => pid !== undefined);
       await pool.transaction(async (tx) => {
-        await tx.queryClassic('SELECT FROM tenon_jobs.jobs WHERE id = $1 FOR UPDATE', [job.id]);
+        await tx.queryClassic('SELECT FROM pgclear_jobs.jobs WHERE id = $1 FOR UPDATE', [job.id]);
         release.resolve();
         await until(
           async () =>
@@ -299,7 +327,7 @@ for (const adapter of ['pgclear', 'Tenon'] as const) {
             ).rows[0]!.blocked,
         );
         await tx.queryClassic(
-          "UPDATE tenon_jobs.jobs SET lease_until = clock_timestamp() - interval '1 second' WHERE id = $1",
+          "UPDATE pgclear_jobs.jobs SET lease_until = clock_timestamp() - interval '1 second' WHERE id = $1",
           [job.id],
         );
       });
@@ -319,6 +347,44 @@ for (const adapter of ['pgclear', 'Tenon'] as const) {
       release.resolve();
       stop.abort();
       await running;
+    }
+  });
+
+  test(`${adapter} bounds a blocked completion through the transaction signal`, async (t) => {
+    const app = await table(t);
+    await pool.queryClassic(`INSERT INTO ${app} VALUES (0)`);
+    const release = Promise.withResolvers<void>();
+    let written = false;
+    const def = transactional(adapter, async (_value, { query }) => {
+      await query(`UPDATE ${app} SET value = 1`);
+      written = true;
+      await release.promise;
+    });
+    const job = await jobs(pool).send(def, 1);
+    const { stop, running } = start(def, { databaseTimeoutMs: 100, recoveryIntervalMs: 30_000 });
+    try {
+      await until(async () => written);
+      await pool.transaction(async (tx) => {
+        await tx.queryClassic('SELECT FROM pgclear_jobs.jobs WHERE id = $1 FOR UPDATE', [job.id]);
+        release.resolve();
+        await assert.rejects(
+          running,
+          (error: unknown) => error instanceof DriverError && error.code === 'PGCLEAR_TIMEOUT',
+        );
+        assert.deepEqual(
+          (
+            await pool.queryClassic(`UPDATE ${app} SET value = value RETURNING value`, [], {
+              timeoutMs: 2000,
+            })
+          ).rows,
+          [{ value: 0 }],
+        );
+      });
+      assert.equal((await jobs(pool).get(job.id))?.state, 'running');
+    } finally {
+      release.resolve();
+      stop.abort();
+      await running.catch(() => {});
     }
   });
 
@@ -346,7 +412,7 @@ for (const adapter of ['pgclear', 'Tenon'] as const) {
         if (cancellation === 'shutdown') stop.abort();
         if (cancellation === 'ownership') {
           await pool.queryClassic(
-            "UPDATE tenon_jobs.jobs SET lease_until = clock_timestamp() - interval '1 second' WHERE id = $1",
+            "UPDATE pgclear_jobs.jobs SET lease_until = clock_timestamp() - interval '1 second' WHERE id = $1",
             [job.id],
           );
           await recoverClaims(execute);
@@ -377,46 +443,6 @@ for (const adapter of ['pgclear', 'Tenon'] as const) {
     });
   }
 }
-
-test('Tenon transactional handlers preserve affected-row guards and query return modes', async (t) => {
-  const app = await table(t);
-  await pool.queryClassic(`INSERT INTO ${app} VALUES (0)`);
-  const def = tenonDefinition({
-    name: definition().name,
-    transactional: true,
-    async handler(_value: number, { tx }) {
-      await assert.rejects(
-        tx.query(unsafeSql(`UPDATE ${app} SET value = 99`, []), {
-          affectedRows: { exact: 0 },
-        }),
-        AffectedRowsError,
-      );
-      await assert.rejects(
-        tx.query(tenonSql`SELECT 1 / 0`, { affectedRows: { exact: 1 } }),
-        (error: unknown) => error instanceof DatabaseError && error.code === '22012',
-      );
-      const row = await tx.query(unsafeSql<{ value: number }>(`SELECT value FROM ${app}`, []), {
-        returns: 'one',
-      });
-      assert.equal(row.value, 0);
-      const literal = await tx.query(tenonSql<{ value: number }>`SELECT ${7}::integer AS value`, {
-        returns: 'one',
-      });
-      await tx.query(unsafeSql(`UPDATE ${app} SET value = $1`, [literal.value]), {
-        affectedRows: { exact: 1 },
-      });
-    },
-  });
-  const job = await jobs(pool).send(def, 1);
-  const { stop, running } = start(def);
-  try {
-    await until(async () => (await jobs(pool).get(job.id))?.state === 'completed');
-    assert.deepEqual((await pool.queryClassic(`SELECT * FROM ${app}`)).rows, [{ value: 7 }]);
-  } finally {
-    stop.abort();
-    await running;
-  }
-});
 
 for (const [commitDelivered, abortBeforeResponse] of [
   [false, false],
@@ -496,7 +522,7 @@ for (const [commitDelivered, abortBeforeResponse] of [
   );
 }
 
-for (const adapter of ['pgclear', 'Tenon'] as const) {
+for (const adapter of ['pgclear', 'integration'] as const) {
   test(
     `${adapter} reports rollback response loss even after shutdown cancellation`,
     { timeout: 15_000 },
@@ -530,7 +556,10 @@ for (const adapter of ['pgclear', 'Tenon'] as const) {
       });
       const job = await jobs(pool).send(def, 1);
       const stop = new AbortController();
-      const outcome = runJobs(worker, [def], { signal: stop.signal, shutdownTimeoutMs: 0 }).then(
+      const outcome = runners.get(def.name)!(worker, {
+        signal: stop.signal,
+        shutdownTimeoutMs: 0,
+      }).then(
         () => null,
         (error: unknown) => error,
       );

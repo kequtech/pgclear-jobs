@@ -11,12 +11,12 @@ import { executionPolicy } from '../../src/definition.js';
 import { pruneCompleted } from '../../src/retention.js';
 import type { Execute } from '../../src/storage.js';
 
-const configured = process.env.TENON_JOBS_TEST_DATABASE_URL;
+const configured = process.env.PGCLEAR_JOBS_TEST_DATABASE_URL;
 if (!configured || !new URL(configured).pathname.endsWith('_test'))
   throw new Error('Use a dedicated database ending in _test.');
 const url = configured;
-const durationMs = Number(process.env.TENON_JOBS_LOAD_DURATION_MS ?? 10_000);
-const intervalMs = Number(process.env.TENON_JOBS_LOAD_INTERVAL_MS ?? 50);
+const durationMs = Number(process.env.PGCLEAR_JOBS_LOAD_DURATION_MS ?? 10_000);
+const intervalMs = Number(process.env.PGCLEAR_JOBS_LOAD_INTERVAL_MS ?? 50);
 if (!Number.isSafeInteger(durationMs) || durationMs < 1000 || durationMs > 300_000)
   throw new Error('Load duration must be 1000–300000 milliseconds.');
 if (!Number.isSafeInteger(intervalMs) || intervalMs < 10 || intervalMs > 1000)
@@ -141,7 +141,7 @@ async function profile(label: string, poolSize: number, handlerDbMs: number, app
         [750, 10],
       ] as const) {
         await database.queryClassic(
-          `INSERT INTO tenon_jobs.jobs (id, name, payload, policy, state, finished_at)
+          `INSERT INTO pgclear_jobs.jobs (id, name, payload, policy, state, finished_at)
            SELECT gen_random_uuid(), $1, '{"load":"history"}'::jsonb, $2::jsonb, 'completed',
            clock_timestamp() - $3::double precision * interval '1 day' FROM generate_series(1, $4::integer)`,
           [definition.name, JSON.stringify(executionPolicy(definition)), days, count],
@@ -149,7 +149,7 @@ async function profile(label: string, poolSize: number, handlerDbMs: number, app
       }
     }
     for (let index = 0; index < 1500; index += 500) await send(0, 500, index);
-    await database.queryClassic('ANALYZE tenon_jobs.jobs');
+    await database.queryClassic('ANALYZE pgclear_jobs.jobs');
     await capturePlan('claim', (execute) => claimJob(execute, names, 5000));
     await capturePlan('cleanup', (execute) => pruneCompleted(execute, names, 7 * 86_400_000));
     loop.enable();
@@ -205,7 +205,7 @@ async function profile(label: string, poolSize: number, handlerDbMs: number, app
     while (true) {
       if (failures.length) throw new AggregateError(failures, 'Load workers failed');
       const { rows } = await database.queryClassic<{ outstanding: number }>(
-        `SELECT count(*)::integer AS outstanding FROM tenon_jobs.jobs WHERE name IN
+        `SELECT count(*)::integer AS outstanding FROM pgclear_jobs.jobs WHERE name IN
          (SELECT jsonb_array_elements_text($1::jsonb)) AND state IN ('pending','running')`,
         [namesJson],
       );
@@ -226,11 +226,11 @@ async function profile(label: string, poolSize: number, handlerDbMs: number, app
       failed: number;
       oldHistory: number;
     }>(
-      `SELECT (SELECT count(*)::integer FROM tenon_jobs.attempts a JOIN tenon_jobs.jobs j ON j.id = a.job_id
+      `SELECT (SELECT count(*)::integer FROM pgclear_jobs.attempts a JOIN pgclear_jobs.jobs j ON j.id = a.job_id
          WHERE j.name IN (SELECT jsonb_array_elements_text($1::jsonb)) AND a.outcome = 'expired') AS expired,
        count(*) FILTER (WHERE state = 'failed')::integer AS failed,
        count(*) FILTER (WHERE payload->>'load' = 'history' AND finished_at < clock_timestamp() - interval '7 days')::integer AS "oldHistory"
-       FROM tenon_jobs.jobs WHERE name IN (SELECT jsonb_array_elements_text($1::jsonb))`,
+       FROM pgclear_jobs.jobs WHERE name IN (SELECT jsonb_array_elements_text($1::jsonb))`,
       [namesJson],
     );
     assert.equal(rows[0]!.expired, 0);
@@ -283,7 +283,7 @@ async function profile(label: string, poolSize: number, handlerDbMs: number, app
     await Promise.all([...runners, ...applications]);
     await client.close();
     await database.queryClassic(
-      'DELETE FROM tenon_jobs.jobs WHERE name IN (SELECT jsonb_array_elements_text($1::jsonb))',
+      'DELETE FROM pgclear_jobs.jobs WHERE name IN (SELECT jsonb_array_elements_text($1::jsonb))',
       [namesJson],
     );
   }
@@ -314,7 +314,8 @@ try {
     profiles,
   };
   const json = JSON.stringify(result, null, 2) + '\n';
-  if (process.env.TENON_JOBS_LOAD_OUTPUT) await writeFile(process.env.TENON_JOBS_LOAD_OUTPUT, json);
+  if (process.env.PGCLEAR_JOBS_LOAD_OUTPUT)
+    await writeFile(process.env.PGCLEAR_JOBS_LOAD_OUTPUT, json);
   process.stdout.write(json);
 } finally {
   await database.close();

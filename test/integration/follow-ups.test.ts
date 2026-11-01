@@ -4,9 +4,7 @@ import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import { listen } from '@kequtech/pgclear';
-import { createTenon } from '@kequtech/tenon-orm';
 import { defineJob, installJobs, jobs, JobError, JobStateError, runJobs } from '../../src/index.js';
-import { jobs as tenonJobs } from '../../src/tenon.js';
 import { claimJob, finishClaim, recoverClaims } from '../../src/claims.js';
 import { checkSchema, notificationChannel } from '../../src/schema.js';
 import { definition, execute, pool, until, url } from '../helpers/database.js';
@@ -116,7 +114,7 @@ for (const ending of [
     const successor = await jobs(pool).request(def, 2, { key: 'one' });
     if (ending === 'expired') {
       await pool.queryClassic(
-        "UPDATE tenon_jobs.jobs SET lease_until = clock_timestamp() - interval '1 second' WHERE id = $1",
+        "UPDATE pgclear_jobs.jobs SET lease_until = clock_timestamp() - interval '1 second' WHERE id = $1",
         [original.id],
       );
       await recoverClaims(execute);
@@ -153,7 +151,7 @@ test('expired claims keep follow-ups blocked through automatic recovery retries'
   const stale = await claim(def.name);
   const successor = await jobs(pool).request(def, 2, { key: 'one' });
   await pool.queryClassic(
-    "UPDATE tenon_jobs.jobs SET lease_until = clock_timestamp() - interval '1 second' WHERE id = $1",
+    "UPDATE pgclear_jobs.jobs SET lease_until = clock_timestamp() - interval '1 second' WHERE id = $1",
     [original.id],
   );
   await recoverClaims(execute);
@@ -212,58 +210,37 @@ test('manual retry refuses to displace a released successor and leaves the trans
   assert.equal((await jobs(pool).get(successor.id))?.payload, 3);
 });
 
-for (const adapter of ['pgclear', 'Tenon'] as const) {
-  test(`${adapter} requests and promotions join the caller's transaction`, async () => {
-    const def = definition();
-    const original = await jobs(pool).request(def, 1, { key: 'one' });
-    const current = await claim(def.name);
-    const db = createTenon({ connection: url });
-    let successorId = '';
-    const rollback = new Error('rollback requests');
-    try {
-      if (adapter === 'pgclear') {
-        await assert.rejects(
-          pool.transaction(async (tx) => {
-            successorId = (await jobs(tx).request(def, 2, { key: 'one' })).id;
-            assert.equal(await jobs(pool).get(successorId), null);
-            throw rollback;
-          }),
-          (error) => error === rollback,
-        );
-      } else {
-        await assert.rejects(
-          db.transaction(async (tx) => {
-            successorId = (await tenonJobs(tx).request(def, 2, { key: 'one' })).id;
-            assert.equal(await jobs(pool).get(successorId), null);
-            throw rollback;
-          }),
-          (error) => error === rollback,
-        );
-      }
+test('requests and promotions join the caller transaction', async () => {
+  const def = definition();
+  const original = await jobs(pool).request(def, 1, { key: 'one' });
+  const current = await claim(def.name);
+  let successorId = '';
+  const rollback = new Error('rollback requests');
+  await assert.rejects(
+    pool.transaction(async (tx) => {
+      successorId = (await jobs(tx).request(def, 2, { key: 'one' })).id;
       assert.equal(await jobs(pool).get(successorId), null);
-      const successor =
-        adapter === 'pgclear'
-          ? await pool.transaction((tx) => jobs(tx).request(def, 3, { key: 'one' }))
-          : await db.transaction((tx) => tenonJobs(tx).request(def, 3, { key: 'one' }));
-      await assert.rejects(
-        pool.transaction(async (tx) => {
-          await jobs(tx).request(def, 4, { key: 'one' });
-          await finishClaim((text, values) => tx.queryClassic(text, values), current, null);
-          assert.equal((await jobs(tx).get(successor.id))?.blockedBy, null);
-          throw rollback;
-        }),
-        (error) => error === rollback,
-      );
-      assert.equal((await jobs(pool).get(successor.id))?.payload, 3);
-      assert.equal((await jobs(pool).get(successor.id))?.blockedBy, original.id);
-      assert.equal((await jobs(pool).get(original.id))?.state, 'running');
-      await finishClaim(execute, current, null);
-      assert.equal((await claim(def.name)).id, successor.id);
-    } finally {
-      await db.close();
-    }
-  });
-}
+      throw rollback;
+    }),
+    (error) => error === rollback,
+  );
+  assert.equal(await jobs(pool).get(successorId), null);
+  const successor = await pool.transaction((tx) => jobs(tx).request(def, 3, { key: 'one' }));
+  await assert.rejects(
+    pool.transaction(async (tx) => {
+      await jobs(tx).request(def, 4, { key: 'one' });
+      await finishClaim((text, values) => tx.queryClassic(text, values), current, null);
+      assert.equal((await jobs(tx).get(successor.id))?.blockedBy, null);
+      throw rollback;
+    }),
+    (error) => error === rollback,
+  );
+  assert.equal((await jobs(pool).get(successor.id))?.payload, 3);
+  assert.equal((await jobs(pool).get(successor.id))?.blockedBy, original.id);
+  assert.equal((await jobs(pool).get(original.id))?.state, 'running');
+  await finishClaim(execute, current, null);
+  assert.equal((await claim(def.name)).id, successor.id);
+});
 
 test('requests racing claims and completion leave the latest work durably executable', async () => {
   for (let index = 0; index < 12; index++) {
@@ -361,7 +338,7 @@ test('a killed worker retains its successor through recovery and retry', async (
   const def = definition({ maxAttempts: 2 });
   const original = await jobs(pool).request(def, 1, { key: 'one' });
   const child = fork(new URL('../fixtures/worker.js', import.meta.url), [def.name], {
-    env: { ...process.env, TENON_JOBS_TEST_DATABASE_URL: url },
+    env: { ...process.env, PGCLEAR_JOBS_TEST_DATABASE_URL: url },
     stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
   });
   const exited = once(child, 'exit');
@@ -460,7 +437,7 @@ test('incompatible installations are rejected without upgrading or erasing data'
   const rollback = new Error('rollback schema fixture');
   await assert.rejects(
     pool.transaction(async (tx) => {
-      await tx.queryClassic('UPDATE tenon_jobs.schema_version SET version = 99');
+      await tx.queryClassic('UPDATE pgclear_jobs.schema_version SET version = 99');
       await assert.rejects(
         checkSchema((text, values) => tx.queryClassic(text, values)),
         /schema is incompatible/,
@@ -499,7 +476,7 @@ for (const existingSuccessor of [false, true]) {
     let pending: ReturnType<ReturnType<typeof jobs>['request']> | undefined;
     try {
       await pool.transaction(async (tx) => {
-        await tx.queryClassic('SELECT id FROM tenon_jobs.jobs WHERE id = $1 FOR UPDATE', [
+        await tx.queryClassic('SELECT id FROM pgclear_jobs.jobs WHERE id = $1 FOR UPDATE', [
           original.id,
         ]);
         pending = jobs(session).request(def, 3, { key: 'one' });
@@ -559,7 +536,7 @@ test('a request waiting behind successor cancellation retains replacement work',
   let pending: ReturnType<ReturnType<typeof jobs>['request']> | undefined;
   try {
     await pool.transaction(async (tx) => {
-      await tx.queryClassic('SELECT id FROM tenon_jobs.jobs WHERE id = $1 FOR UPDATE', [
+      await tx.queryClassic('SELECT id FROM pgclear_jobs.jobs WHERE id = $1 FOR UPDATE', [
         successor.id,
       ]);
       pending = jobs(session).request(def, 3, { key: 'one' });
