@@ -1,7 +1,7 @@
 # API
 
 Import from `@kequtech/tenon-jobs` for pgclear, or `/tenon` for Tenon. The Tenon entry point re-exports
-the full API and adapts `jobs` for a Tenon database or transaction. No facade opens or commits a caller's
+the full API and adapts `jobs` and transactional handler contexts for Tenon. No facade opens or commits a caller's
 transaction. Start with the [quick start](../README.md); this document covers the full contract.
 
 ## Definitions
@@ -18,15 +18,16 @@ const sync = defineJob({
 Definitions are immutable and open no connections. Names contain 1–200 characters and cannot be
 blank. Handlers return `void` or `Promise<void>`; business results belong in application records.
 
-| Definition option    | Default        | Meaning                                            |
-| -------------------- | -------------- | -------------------------------------------------- |
-| `maxAttempts`        | 3              | Total attempts, including the first; 1–1000        |
-| `executionTimeoutMs` | 300000         | Per-attempt execution limit                        |
-| `concurrency`        | Runner's limit | Per-definition cap within each runner              |
-| `retryDelayMs`       | 1000           | Base delay; 0–86400000 ms                          |
-| `retryBackoff`       | `exponential`  | `exponential` or `fixed`                           |
-| `retryMaxDelayMs`    | 86400000       | Cap before jitter                                  |
-| `retryJitter`        | true           | Randomize between half and all of the capped delay |
+| Definition option    | Default        | Meaning                                                 |
+| -------------------- | -------------- | ------------------------------------------------------- |
+| `maxAttempts`        | 3              | Total attempts, including the first; 1–1000             |
+| `executionTimeoutMs` | 300000         | Per-attempt execution limit                             |
+| `concurrency`        | Runner's limit | Per-definition cap within each runner                   |
+| `transactional`      | false          | Commit handler writes and completion in one transaction |
+| `retryDelayMs`       | 1000           | Base delay; 0–86400000 ms                               |
+| `retryBackoff`       | `exponential`  | `exponential` or `fixed`                                |
+| `retryMaxDelayMs`    | 86400000       | Cap before jitter                                       |
+| `retryJitter`        | true           | Randomize between half and all of the capped delay      |
 
 Execution limits and retry policy are saved with each new job. Deployed handlers run existing jobs
 with their saved policy; new policy settings apply to new records. Definition concurrency is local
@@ -44,6 +45,37 @@ without mutating the original payload. Top-level undefined, undefined array elem
 numbers, bigint, cycles, Dates, accessors, symbols and other lossy values are rejected before SQL.
 Names, keys and JSON text reject NUL and unpaired Unicode surrogates. Validate untrusted application
 payloads in application code; TypeScript does not validate previously stored JSON schemas.
+
+### Transactional handlers
+
+Set `transactional: true` on a definition to receive `tx` alongside the ordinary handler context.
+For the core entry point, `tx` is a pgclear `Transaction`, including `query`, `queryClassic` and
+`savepoint`. For `/tenon`, it is a Tenon transaction `QueryClient`, including SQL tags, query return
+modes and affected-row checks. Use the matching entry point's `jobs(tx)` for transactional submissions.
+The runner and record methods accept definitions from either entry point.
+
+Claims commit before the handler transaction opens. Application writes through `tx`, follow-up
+submissions, successful attempt history and job completion then commit together. Handler exceptions
+roll them back before failure/retry bookkeeping is recorded separately. Completion rechecks the
+attempt token, lease and deadline; refused completion rolls back application writes. Deadline, lost
+ownership and shutdown expiry cancel the driver transaction even if the handler ignores its signal.
+Its local slot remains occupied until the original handler settles or shutdown spends its grace.
+The supplied transaction expires after use and must not escape the handler.
+Its lifetime, including acquisition and commit, is bounded by the attempt's lease/execution signal;
+`databaseTimeoutMs` bounds the runner's queue statements and maintenance operations.
+
+Every operation requiring this atomicity must use `tx`. Calls through another database/pool,
+separate transactions and external effects do not participate. Await all transactional operations.
+This does not prevent duplicate business submissions or make external effects exactly once.
+
+Transactional execution is a property of the deployed handler, like its implementation, and is not
+saved in job policy. It applies to existing jobs when that handler is deployed. It is opt-in and holds
+one pool connection for the transaction's duration; allow additional connections for heartbeats,
+claims, recovery and application queries. Keep transactions short. Commit/transport errors reject
+the runner for supervision; cancellation does not suppress rollback or connection-release failures.
+If cleanup fails after a handler error, the original sanitized error remains available as its cause.
+No application transaction is automatically replayed. A lost commit
+response leaves both writes and completion committed, or neither, and recovery observes that state.
 
 ## Submit work
 
@@ -124,7 +156,8 @@ Mutations refuse ineligible states with `JobStateError` and missing targets with
 These errors leave the caller's transaction usable. Cancellation never revokes running external
 effects. Explicit pending edits can change retry payloads; ordinary `request` preserves them.
 Manual retry creates a fresh UUID and budget, preserving original history and schedule context;
-`retryOf` links the records. An occupied key raises `JobStateError`. Repeated unkeyed manual retries
+`retryOf` links the records. An occupied key or a pending/running job for the same schedule raises
+`JobStateError`. Repeated unkeyed, unscheduled manual retries
 can create independent work; reconcile a lost response through application state.
 
 ## Retention
@@ -165,7 +198,7 @@ the definition must be running to advance its schedules.
 ## Installation and workers
 
 `installJobs(pool)` installs the reserved schema explicitly, transactionally and safely across
-concurrent installers. The unreleased baseline is schema version 2, with no upgrade migrations.
+concurrent installers. The unreleased baseline is schema version 3, with no upgrade migrations.
 Installation is repeatable for that version. Stop old producers/runners and explicitly drop an older
 disposable `tenon_jobs` schema before reinstalling. Installation never erases it automatically.
 

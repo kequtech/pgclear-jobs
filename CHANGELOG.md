@@ -2,6 +2,10 @@
 
 ## 0.1.0 — Unreleased
 
+- Preserve transaction rollback/release failures during cancellation, retaining the original handler error as a sanitized cause; cover lost rollback responses, SQL errors and lease expiry during completion lock waits.
+- Opt-in transactional handlers receive a pgclear or Tenon transaction that commits application writes, follow-up submissions and successful completion together; errors and lost ownership force rollback.
+- Exercise transactional retries, cancellation, heartbeat renewal, Tenon query guards and lost COMMIT responses without replaying application transactions.
+
 - Initial pgclear-backed job records and explicit schema installation.
 - Typed definitions, policy snapshots and outstanding-work keys.
 - Lookup, pending edits, rescheduling, cancellation and attempt inspection.
@@ -34,3 +38,6 @@
 - Rotate claims between eligible definitions, preserving oldest-due-first selection within each definition without new scheduling options.
 - Bound claim, next-due and retention scans by definition using existing indexes instead of sorting entire backlogs or scanning retained history.
 - Add reproducible sustained-load profiles and fairness/shared-pool exhaustion regressions without changing the public API.
+- Enforce schedule overlap suppression across manual retries and scheduler races with one unique outstanding-job index.
+- Exclude retained failures from automatic cleanup index scans; cover a failure-heavy history and both retry/scheduler insert orders.
+- Refresh the disposable schema baseline to version 3 for the revised indexes; document Site's retry-backoff and stalled-handler canary checks.

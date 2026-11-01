@@ -3,6 +3,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { before, after } from 'node:test';
 import { createPool } from '@kequtech/pgclear';
 import { defineJob, installJobs } from '../../src/index.js';
+import type { JobOptions } from '../../src/index.js';
 import type { Execute } from '../../src/storage.js';
 
 const configured = process.env.TENON_JOBS_TEST_DATABASE_URL;
@@ -13,7 +14,9 @@ export const url = configured;
 export const pool = createPool({ connectionString: url, maxConnections: 12 });
 export const execute: Execute = (text, values) => pool.queryClassic(text, values);
 export const names: string[] = [];
-export function definition(options: Partial<Parameters<typeof defineJob<number>>[0]> = {}) {
+export function definition(
+  options: Partial<Extract<JobOptions<number>, { transactional?: false }>> = {},
+) {
   const name = `test-${randomUUID()}`;
   names.push(name);
   return defineJob({

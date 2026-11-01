@@ -67,6 +67,14 @@ test('packed core and declarations work without the optional Tenon peer', async 
       import { createPool } from '@kequtech/pgclear';
       const pool = createPool({});
       const definition = defineJob({ name: 'typed', handler(payload: { id: string }) {} });
+      const transactional = defineJob({
+        name: 'transactional', transactional: true,
+        async handler(payload: { id: string }, { tx }) {
+          await tx.queryClassic('SELECT $1::text', [payload.id]);
+          await jobs(tx).send(definition, payload);
+        }
+      });
+      void runJobs(pool, [definition, transactional]);
       const record = await jobs(pool).send(definition, { id: 'example' });
       const id: string = record.payload.id;
       const batch = await jobs(pool).sendMany(definition, [{ payload: { id: 'batch' } }]);

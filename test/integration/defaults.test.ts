@@ -151,6 +151,50 @@ test('automatic retention is bounded, skips locks and coordinates competing clea
   assert.equal((await jobs(pool).stats(def)).total, 0);
 });
 
+test('automatic retention avoids scanning substantial retained failure history', async () => {
+  const def = definition({ maxAttempts: 1 });
+  const completed = await terminal(def, 'completed');
+  const recent = await terminal(def, 'completed', 1);
+  const policy = (await jobs(pool).get(completed))!.policy;
+  await pool.queryClassic(
+    `INSERT INTO tenon_jobs.jobs (id, name, payload, policy, state, finished_at)
+     SELECT md5($1 || n::text)::uuid, $1, '1'::jsonb, $2::jsonb, 'failed',
+       clock_timestamp() - interval '30 days' FROM generate_series(1, 20000) AS n`,
+    [def.name, JSON.stringify(policy)],
+  );
+  await pool.queryClassic('ANALYZE tenon_jobs.jobs');
+  // Inspect actual work, not elapsed time or a particular planner/index choice.
+  interface Plan {
+    readonly 'Rows Removed by Filter'?: number;
+    readonly 'Actual Loops': number;
+    readonly Plans?: readonly Plan[];
+  }
+  await pool.transaction(async (tx) => {
+    await pruneCompleted(
+      async (sql, values) => {
+        const { rows } = await tx.queryClassic<{ 'QUERY PLAN': { Plan: Plan }[] }>(
+          `EXPLAIN (ANALYZE, FORMAT JSON) ${sql}`,
+          values,
+        );
+        const filtered = (plan: Plan): number =>
+          (plan['Rows Removed by Filter'] ?? 0) * plan['Actual Loops'] +
+          (plan.Plans ?? []).reduce((sum, child) => sum + filtered(child), 0);
+        assert.ok(
+          filtered(rows[0]!['QUERY PLAN'][0]!.Plan) < 100,
+          'cleanup must not scan and filter the 20,000 retained failures',
+        );
+        return { rows: [] };
+      },
+      [def.name],
+      7 * 86_400_000,
+    );
+    assert.equal(await jobs(tx).get(completed), null);
+  });
+  assert.equal(await pruneCompleted(execute, [def.name], 7 * 86_400_000), 0);
+  assert.equal((await jobs(pool).get(recent))?.state, 'completed');
+  assert.equal((await jobs(pool).stats(def)).failed, 20_000);
+});
+
 test('stable-ID reconciliation works within the automatic retention window and expires with history', async () => {
   const def = definition();
   const id = randomUUID();

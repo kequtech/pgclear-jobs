@@ -33,6 +33,15 @@ installations; add a data-preserving schema/rollout path before the first upgrad
 - [ ] Migrate Site editorial producers to keyed `request` only after app-owned forced-request
       arbitration is atomic. Preserve forced timing and intent when automatic requests arrive.
       The library replaces pending payloads; it does not merge business rules.
+- [ ] Before the Site editorial canary, exercise an automatic job entering retry backoff, then an
+      “analyse now” request, then another automatic request through the real app producers. Choose
+      and assert when forced work must run relative to the original retries, and verify that later
+      automatic requests cannot erase forced intent or postpone its chosen timing.
+- [ ] Before the Site editorial canary, fill every handler slot with calls that exceed their execution
+      deadlines. Pass the job abort signal through the actual editorial dependencies and verify that
+      cancellation frees slots and queued work resumes. Also exercise a dependency that ignores
+      cancellation: supervision must detect stalled queue progress and restart the worker even while
+      HTTP remains healthy. Observe recovery and check effects remain idempotent after restart.
 - [ ] Assess app-specific global pause, active cancellation and resuming cancelled work. The current
       API cancels pending jobs and supports process-level shutdown; it does not revoke external effects.
 - [ ] Add schedule-list pagination if an app approaches the 1000-schedule listing limit.

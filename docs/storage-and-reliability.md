@@ -22,6 +22,22 @@ All SQL uses bound parameters through a narrow execution boundary. `jobs(tx)` pa
 caller's transaction without owning it. Commits expose jobs and notifications together; rollbacks
 expose neither. A facade retains its scope and obeys its lifetime. Keep app transactions short.
 
+Definitions may opt into `transactional: true`. Claims still commit separately before execution.
+The runner then opens a pgclear transaction and supplies it as `tx` (a Tenon query client through
+`/tenon`). Application writes, follow-up submissions, successful attempt history and completion commit
+together. A failed completion fence or handler exception rolls back application writes; handler
+failure/retry bookkeeping is recorded afterward using the ordinary fenced statement. Native driver
+cancellation expires and rolls back the transaction even when JavaScript ignores the abort signal,
+while the unfinished handler retains its local slot. Heartbeats use separate pooled connections and
+the job row is locked only during completion, not throughout the handler. These transactions hold a
+connection and application locks until commit/rollback, so keep them short and leave pool capacity
+for renewals and maintenance. Database/commit failures reject the runner without replaying the
+transaction; an uncertain commit includes both application effects and completion, or neither.
+Only operations through the supplied transaction participate in this guarantee.
+Expected cancellation is suppressed only when driver cleanup succeeds. Lost rollback responses and
+connection-release failures reject the runner even during shutdown, preserving aggregate driver
+errors and the handler failure's sanitized cause for supervision.
+
 ## Submission identities and updates
 
 A job UUID identifies a retained submission across every state. Reusing an explicit ID returns the
@@ -95,7 +111,8 @@ successful claim. Indexed per-definition lookups inspect at most one due candida
 then select the first eligible turn. Within each definition, due time and UUID order remain intact.
 Next-due calculation likewise takes only the earliest future candidate per definition. This avoids
 sorting a whole backlog to claim one job and preserves the shared snapshot for claims and timers.
-This is local admission fairness, not preemption or a global weighted scheduler. No row lock or transaction spans a handler. Unknown names
+This is local admission fairness, not preemption or a global weighted scheduler. No claim transaction
+spans a handler; opt-in handler transactions hold application locks. Unknown names
 are left alone. Every outcome and heartbeat checks the current token and live lease. Successful
 completion also checks the execution deadline. These time checks run **after** acquiring the row
 lock: a lock-only wait must not authorize an operation using an earlier time check.
@@ -138,7 +155,10 @@ or session-pooled connection; a query pool may use transaction pooling.
 Schedules are durable producers, not a second executor. A pass locks at most 50 due schedules for its
 selected names, submits ordinary jobs and advances cursors in one transaction. Occurrence uniqueness
 prevents duplicate original submissions. Explicit manual retries are separate linked attempts at the
-same occurrence and retain overlap protection. Removing a producer leaves its jobs intact.
+same occurrence. A unique partial index permits only one pending/running job per schedule, so a
+manual retry of an older failure raises `JobStateError` while a later occurrence is outstanding.
+Concurrent scheduler/retry inserts share that arbitration: a losing scheduler skips the occurrence;
+a losing manual retry raises `JobStateError`. Removing a producer leaves its jobs intact.
 
 A schedule submits its saved due occurrence once and advances directly into the future. It never
 walks every missed tick. Overlap suppression counts pending/running work, including automatic and
@@ -159,7 +179,8 @@ runner-owned listener closes.
 
 Runners retain completed/cancelled history for seven days, then remove it in batches of at most 100
 using a single database statement-time cutoff and skipping locked rows. Per-definition index scans
-consider at most 100 expired candidates each, then one global batch deletes at most 100. Cleanup
+use a completed/cancelled-only index, excluding retained failures, and consider at most 100 expired
+candidates each, then one global batch deletes at most 100. Cleanup
 runs for selected definitions in the existing maintenance loop, checks once a minute, and drains a full batch on the next maintenance
 pass. No outstanding or failed work is expired. Runner `retentionMs` extends this window or disables
 cleanup with `false`; runners sharing definitions should agree on retention. Failed records require

@@ -12,9 +12,9 @@ tenon-jobs core ──────────→ pgclear
 tenon-jobs/tenon ─────────→ Tenon public queries + jobs core
 ```
 
-The core has no Tenon import or required peer. The optional integration uses Tenon's public `query`
-and `unsafeSql`, including transaction lifetime checks; it never escapes through `db.native`.
-The `/tenon` entry point re-exports the full API, adapting only `jobs`. A packaged consumer test
+The core has no Tenon import or required peer. The optional integration uses Tenon's public `query`,
+`unsafeSql` and `createTenon`, including transaction lifetime checks; it never escapes through `db.native`.
+The `/tenon` entry point re-exports the full API, adapting `jobs` and transactional handler scopes. A packaged consumer test
 verifies core runtime and declarations without Tenon installed.
 
 One reserved `tenon_jobs` schema holds jobs, attempts, schedules and schema version metadata across all
@@ -40,9 +40,12 @@ coalescing remain atomic through either a pool or application transaction. A ter
 trigger releases successors; claims and wakeup timers select only unblocked work.
 
 An app writes data and jobs in one transaction. After commit, a runner claims a due record in a short
-statement, then invokes its handler outside that transaction. A separate fenced statement records
-success or failure. The handler may use ordinary app transactions; Jobs does not coordinate them
-with queue completion. App results and domain idempotency belong in app records.
+statement. Ordinary handlers use their own app transactions, followed by a separate fenced outcome.
+Opt-in transactional handlers receive a scope whose writes and successful completion commit together.
+Refused completion forces rollback; handler failure is recorded after rollback. The Tenon adapter
+borrows the runner's pgclear transaction through the public pool interface to construct a normal
+Tenon transaction client, preserving query policies without a second connection or private imports.
+App results and domain idempotency belong in app records.
 
 A runner shares the app event loop or lives in a separately supervised process. It creates no threads.
 One dispatcher rotates eligible definitions as it fills local slots; one maintenance loop recovers claims, advances schedules and
@@ -58,13 +61,14 @@ The comparison below uses upstream pg-boss documentation reviewed on 1 November 
 requests pg-boss `^12.36.0`; current upstream examples may include newer behavior. A smaller exported
 API does not by itself make an application easier to operate.
 
-| Workflow                | pg-boss                                                              | Tenon Jobs                                                                         |
-| ----------------------- | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| Ordinary work           | Start one instance, create a named queue, then use `send` and `work` | Define a typed job, use `jobs(scope).send`, and select definitions in one runner   |
-| Application transaction | Pass an ORM/transaction adapter in the operation's `db` option       | Use `jobs(tx)` through pgclear or the optional Tenon entry point                   |
-| Keyed latest-state work | Choose a queue policy and combine it with keyed submission/upsert    | Use keyed `request`, with one head and one coalesced successor                     |
-| Recurring work          | Register a cron schedule on the instance                             | Register a cron schedule through the existing record facade                        |
-| Lifecycle               | The instance manages workers and connection setup                    | A runner promise and abort signal use the application pool; a listener is optional |
+| Workflow                             | pg-boss                                                              | Tenon Jobs                                                                         |
+| ------------------------------------ | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| Ordinary work                        | Start one instance, create a named queue, then use `send` and `work` | Define a typed job, use `jobs(scope).send`, and select definitions in one runner   |
+| Application transaction              | Pass an ORM/transaction adapter in the operation's `db` option       | Use `jobs(tx)` through pgclear or the optional Tenon entry point                   |
+| Atomic handler writes and completion | Opt into transactional workers                                       | Set `transactional: true` on a definition and use the supplied `tx`                |
+| Keyed latest-state work              | Choose a queue policy and combine it with keyed submission/upsert    | Use keyed `request`, with one head and one coalesced successor                     |
+| Recurring work                       | Register a cron schedule on the instance                             | Register a cron schedule through the existing record facade                        |
+| Lifecycle                            | The instance manages workers and connection setup                    | A runner promise and abort signal use the application pool; a listener is optional |
 
 Sources: pg-boss [getting started](https://pgboss.io/),
 [jobs](https://pgboss.io/api/jobs), [workers](https://pgboss.io/api/workers),

@@ -1,5 +1,11 @@
 export { defineJob } from './definition.js';
-export type { ExecutionPolicy, HandlerContext, JobDefinition, JobOptions } from './definition.js';
+export type {
+  ExecutionPolicy,
+  HandlerContext,
+  TransactionalHandlerContext,
+  JobDefinition,
+  JobOptions,
+} from './definition.js';
 export { jobs } from './records.js';
 export type {
   JobRecords,

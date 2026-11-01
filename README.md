@@ -63,6 +63,31 @@ The job commits or rolls back with the order. Core `jobs(pool)` and `jobs(tx)` u
 Handlers execute independently of the submitting transaction. To share the application pool, create
 Tenon with `createTenon({ connection: pool })`. Tenon is optional for the core package.
 
+## Commit handler writes with completion
+
+Opt into `transactional: true` for short database handlers. The runner supplies `tx`, then commits
+its writes and successful job completion together:
+
+```ts
+import { defineJob } from '@kequtech/tenon-jobs/tenon';
+import { sql } from '@kequtech/tenon-orm';
+
+const markProjectReady = defineJob({
+  name: 'mark-project-ready',
+  transactional: true,
+  async handler(payload: { projectId: string }, { tx }) {
+    await tx.query(sql`UPDATE projects SET ready = true WHERE id = ${payload.projectId}`);
+  },
+});
+```
+
+The core import supplies a pgclear `Transaction`; `/tenon` supplies a Tenon transaction query client.
+Both work with their entry point's `jobs(tx)` for follow-up submissions. Handler errors and lost
+ownership roll back the transaction; failure/retry history is recorded separately. Calls through a
+separate `db` or pool and external effects remain outside it. Transactional handlers hold a connection
+until commit or rollback, so reserve pool capacity for claims, renewals and application traffic.
+Use ordinary handlers for long external calls. See the [transaction contract](docs/api.md#transactional-handlers).
+
 ## Send events or request the latest state
 
 Use `send` when each event needs processing. Keep a stable UUID when the same submission may be

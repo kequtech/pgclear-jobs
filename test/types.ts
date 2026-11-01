@@ -1,7 +1,8 @@
 import { createPool } from '@kequtech/pgclear';
 import type { QueryClient } from '@kequtech/tenon-orm';
 import { defineJob, jobs, runJobs } from '../src/index.js';
-import { jobs as tenonJobs } from '../src/tenon.js';
+import { sql as tenonSql } from '@kequtech/tenon-orm';
+import { defineJob as defineTenonJob, jobs as tenonJobs } from '../src/tenon.js';
 
 // Compile-time consumer contract; never executed.
 async function types(tx: QueryClient) {
@@ -18,6 +19,41 @@ async function types(tx: QueryClient) {
       void payload;
     },
   });
+  const transactional = defineJob({
+    name: 'transactional',
+    transactional: true,
+    async handler(payload: { id: string }, { tx }) {
+      await tx.queryClassic('SELECT $1::text', [payload.id]);
+      await tx.savepoint(async (nested) => {
+        await jobs(nested).send(a, payload);
+      });
+    },
+  });
+  const tenonTransactional = defineTenonJob({
+    name: 'tenon-transactional',
+    transactional: true,
+    async handler(payload: { id: string }, { tx }) {
+      const row = await tx.query(tenonSql<{ id: string }>`SELECT ${payload.id}::text AS id`, {
+        returns: 'one',
+      });
+      const id: string = row.id;
+      await tenonJobs(tx).send(a, { id });
+      // @ts-expect-error A Tenon handler receives the Tenon API, not a native driver scope.
+      await tx.queryClassic('SELECT 1');
+    },
+  });
+  defineJob({
+    name: 'ordinary',
+    handler(_payload: number, context) {
+      // @ts-expect-error Ordinary handlers do not receive a transaction.
+      void context.tx;
+    },
+  });
+  await jobs(pool).send(transactional, { id: 'one' });
+  await tenonJobs(tx).send(tenonTransactional, { id: 'two' });
+  // @ts-expect-error Transactional payload types remain bound to their definition.
+  await jobs(pool).send(transactional, { id: 1 });
+  await runJobs(pool, [a, transactional, tenonTransactional]);
   const job = await jobs(pool).send(a, { id: '1' });
   const id: string = job.payload.id;
   void id;

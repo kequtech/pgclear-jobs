@@ -1,3 +1,5 @@
+import type { Transaction } from '@kequtech/pgclear';
+
 export interface ExecutionPolicy {
   readonly maxAttempts: number;
   readonly retryDelayMs: number;
@@ -16,18 +18,31 @@ export interface HandlerContext {
   readonly scheduledFor: Date | null;
 }
 
-export interface JobDefinition<Payload> extends ExecutionPolicy {
+export interface TransactionalHandlerContext<Tx = Transaction> extends HandlerContext {
+  /** Writes through this scope commit atomically with successful job completion. */
+  readonly tx: Tx;
+}
+
+interface DefinitionOptions {
   readonly name: string;
   /** Per-runner limit for this definition, within the runner's overall limit. */
   readonly concurrency?: number;
-  handler(payload: Payload, context: HandlerContext): void | Promise<void>;
 }
 
-export interface JobOptions<Payload> extends Partial<ExecutionPolicy> {
-  readonly name: string;
-  readonly concurrency?: number;
-  handler(payload: Payload, context: HandlerContext): void | Promise<void>;
-}
+export type JobOptions<Payload, Tx = Transaction> = DefinitionOptions &
+  Partial<ExecutionPolicy> &
+  (
+    | {
+        readonly transactional?: false;
+        handler(payload: Payload, context: HandlerContext): void | Promise<void>;
+      }
+    | {
+        readonly transactional: true;
+        handler(payload: Payload, context: TransactionalHandlerContext<Tx>): void | Promise<void>;
+      }
+  );
+
+export type JobDefinition<Payload> = JobOptions<Payload> & ExecutionPolicy;
 
 export function integer(value: number, name: string, min = 1, max = 2_147_483_647): number {
   if (!Number.isSafeInteger(value) || value < min || value > max) {
@@ -60,14 +75,25 @@ export function uuid(value: unknown): string {
   return value.toLowerCase();
 }
 
+export function defineJob<Payload>(
+  options: Extract<JobOptions<Payload>, { transactional: true }>,
+): Extract<JobDefinition<Payload>, { transactional: true }>;
+export function defineJob<Payload>(
+  options: Extract<JobOptions<Payload>, { transactional?: false }>,
+): Extract<JobDefinition<Payload>, { transactional?: false }>;
+export function defineJob<Payload>(options: JobOptions<Payload>): JobDefinition<Payload>;
 export function defineJob<Payload>(options: JobOptions<Payload>): JobDefinition<Payload> {
   if (typeof options.name !== 'string' || !options.name.trim() || options.name.length > 200) {
     throw new TypeError('Job name must contain 1–200 characters and cannot be blank.');
   }
   if (typeof options.handler !== 'function') throw new TypeError('A job handler is required.');
+  if (options.transactional !== undefined && typeof options.transactional !== 'boolean')
+    throw new TypeError('transactional must be boolean.');
   return Object.freeze({
     name: databaseText(options.name, 'Job name'),
-    handler: options.handler,
+    ...(options.transactional
+      ? { transactional: true as const, handler: options.handler }
+      : { handler: options.handler }),
     ...executionPolicy(options),
     ...(options.concurrency === undefined
       ? {}

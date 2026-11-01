@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { defineJob } from '../src/index.js';
 import { serializePayload } from '../src/definition.js';
+import { defineJob as defineTenonJob } from '../src/tenon.js';
 
 test('definitions are inert, immutable and preserve the handler', () => {
   let called = false;
@@ -54,4 +55,22 @@ test('optional object fields serialize naturally without changing array position
   assert.equal(Object.hasOwn(payload, 'optional'), true);
   assert.throws(() => serializePayload([undefined]), TypeError);
   assert.throws(() => serializePayload(undefined), TypeError);
+});
+
+test('transactional execution is opt-in and validates the handler and flag', () => {
+  assert.equal(
+    defineJob({ name: 'transactional', transactional: true, handler() {} }).transactional,
+    true,
+  );
+  assert.equal(
+    defineTenonJob({ name: 'transactional', transactional: true, handler() {} }).transactional,
+    true,
+  );
+  for (const define of [defineJob, defineTenonJob]) {
+    assert.equal(define({ name: 'plain', handler() {} }).transactional, undefined);
+    // @ts-expect-error Runtime options also reject invalid transaction flags.
+    assert.throws(() => define({ name: 'invalid', transactional: 'yes', handler() {} }), TypeError);
+    // @ts-expect-error Adapters must not hide an invalid original handler.
+    assert.throws(() => define({ name: 'invalid', transactional: true, handler: null }), TypeError);
+  }
 });

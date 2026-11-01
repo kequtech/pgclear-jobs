@@ -2,7 +2,7 @@ import type { Pool } from '@kequtech/pgclear';
 import type { Execute } from './storage.js';
 
 export const notificationChannel = 'tenon_jobs_ready';
-const schemaVersion = 2;
+const schemaVersion = 3;
 
 // Unreleased baseline. Disposable older installations must be dropped explicitly, not migrated.
 const statements = [
@@ -42,10 +42,13 @@ const statements = [
   'CREATE INDEX jobs_lookup ON tenon_jobs.jobs (name, created_at, id)',
   `CREATE UNIQUE INDEX jobs_schedule_occurrence ON tenon_jobs.jobs (schedule_id, scheduled_for)
     WHERE retry_of IS NULL`,
-  `CREATE INDEX jobs_schedule_outstanding ON tenon_jobs.jobs (schedule_id)
-    WHERE state IN ('pending', 'running')`,
+  // Arbitrate both scheduled production and manual retries, including concurrent inserts.
+  `CREATE UNIQUE INDEX jobs_schedule_outstanding ON tenon_jobs.jobs (schedule_id)
+    WHERE schedule_id IS NOT NULL AND state IN ('pending', 'running')`,
   `CREATE INDEX jobs_terminal ON tenon_jobs.jobs (name, finished_at, id)
     WHERE state IN ('completed', 'failed', 'cancelled')`,
+  `CREATE INDEX jobs_retention ON tenon_jobs.jobs (name, finished_at, id)
+    WHERE state IN ('completed', 'cancelled')`,
   `CREATE TABLE tenon_jobs.attempts (
     job_id uuid NOT NULL REFERENCES tenon_jobs.jobs(id) ON DELETE CASCADE,
     number integer NOT NULL,

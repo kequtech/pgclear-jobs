@@ -239,7 +239,7 @@ export class JobRecords {
     );
   }
 
-  /** A fresh job and attempt budget; the failed record and its history remain intact. */
+  /** A fresh budget and linked job; an occupied key or schedule rejects the retry. */
   async retry(id: string): Promise<Job> {
     const { rows } = await this.execute<{ record: StoredJob }>(
       `WITH source AS MATERIALIZED (

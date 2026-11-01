@@ -1,10 +1,10 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { setMaxListeners } from 'node:events';
-import { listen } from '@kequtech/pgclear';
+import { DriverError, listen } from '@kequtech/pgclear';
 import type { ConnectionOptions, Listener, Pool } from '@kequtech/pgclear';
 import { integer, validateOptions } from './definition.js';
 import { errorText, JobError } from './errors.js';
-import type { JobDefinition } from './definition.js';
+import type { HandlerContext, JobDefinition } from './definition.js';
 import { claimJob, finishClaim, recoverClaims, renewClaim } from './claims.js';
 import type { Claim } from './claims.js';
 import { checkSchema, notificationChannel } from './schema.js';
@@ -27,7 +27,7 @@ export interface RunnerOptions {
   readonly leaseMs?: number;
   /** Finish active work for this long after abort; then abandon claims. Default 30000. */
   readonly shutdownTimeoutMs?: number;
-  /** Bound each driver operation, including pool acquisition and listener startup. Default 10000. */
+  /** Bound queue statements, maintenance and listener startup. Default 10000. */
   readonly databaseTimeoutMs?: number;
   /** Completed/cancelled history: default 7 days. False disables automatic cleanup. */
   readonly retentionMs?: number | false;
@@ -42,12 +42,14 @@ async function pause(ms: number, signal: AbortSignal): Promise<void> {
 }
 
 async function executeClaim(
+  pool: Pool,
   execute: Execute,
   claim: Claim,
   definition: JobDefinition<unknown>,
   leaseMs: number,
   abandon: AbortSignal,
   requestedAt: number,
+  databaseMs: number,
 ): Promise<void> {
   // Fail closed if transport/pool delay spent the claim's budget. Monotonic time
   // avoids depending on synchronization between the database and worker clocks.
@@ -64,19 +66,62 @@ async function executeClaim(
     else leaseTimer = setTimeout(() => controller.abort(new Error('Job lease expired')), remaining);
   };
   watchLease(remainingLease);
+  const context: HandlerContext = {
+    id: claim.id,
+    attempt: claim.attempt_count,
+    signal,
+    maxAttempts: claim.policy.maxAttempts,
+    scheduledFor: claim.scheduled_for ? new Date(claim.scheduled_for) : null,
+  };
+  // The driver can roll back on cancellation before arbitrary user JavaScript settles.
+  // Keep the original handler separately so cancellation never releases its local slot early.
+  let userHandler: Promise<string | JobError | null> = Promise.resolve(null);
+  const invoke = (work: () => void | Promise<void>) => {
+    userHandler = Promise.resolve()
+      .then(work)
+      .then(
+        () => null,
+        (error: unknown) => (error instanceof JobError ? error : errorText(error)),
+      );
+    return userHandler;
+  };
   const handler = Promise.resolve().then(async () => {
     if (signal.aborted) return;
+    if (!definition.transactional) return invoke(() => definition.handler(claim.payload, context));
+    // Only a confirmed handler failure is recorded outside the rolled-back transaction.
+    // Transaction/commit failures propagate to supervision, including uncertain commits.
+    const failure = new Error('Transactional handler failed');
+    let outcome: string | JobError | null = null;
     try {
-      await definition.handler(claim.payload, {
-        id: claim.id,
-        attempt: claim.attempt_count,
-        signal,
-        maxAttempts: claim.policy.maxAttempts,
-        scheduledFor: claim.scheduled_for ? new Date(claim.scheduled_for) : null,
-      });
+      await pool.transaction(
+        async (tx) => {
+          outcome = await invoke(() => definition.handler(claim.payload, { ...context, tx }));
+          if (outcome !== null) {
+            failure.cause = errorText(outcome);
+            throw failure;
+          }
+          signal.throwIfAborted();
+          if (
+            !(await finishClaim(
+              (text, values) => tx.queryClassic(text, values, { timeoutMs: databaseMs }),
+              claim,
+              null,
+            ))
+          ) {
+            controller.abort(new Error('Job claim lost'));
+            signal.throwIfAborted();
+          }
+        },
+        { signal },
+      );
       return null;
     } catch (error) {
-      return error instanceof JobError ? error : errorText(error);
+      if (error === failure) return outcome;
+      // A cancelled driver transaction is expected only after confirmed cleanup.
+      // Never hide rollback/release failures (including AggregateError) or uncertain commits.
+      if (signal.aborted && error instanceof DriverError && error.code === 'PGCLEAR_ABORTED')
+        return;
+      throw error;
     }
   });
   const heartbeat = async () => {
@@ -102,7 +147,7 @@ async function executeClaim(
   );
   try {
     const result = await Promise.race([settleOrAbort(handler, signal), beat]);
-    if (!signal.aborted && result !== undefined) {
+    if (!signal.aborted && result !== undefined && (!definition.transactional || result !== null)) {
       await finishClaim(execute, claim, result);
     }
   } finally {
@@ -110,11 +155,16 @@ async function executeClaim(
     controller.abort(new Error('Attempt finished'));
     clearTimeout(leaseTimer);
     clearTimeout(timeout);
-    await beat;
+    try {
+      await beat;
+    } finally {
+      // Wait for transaction rollback/cleanup even if cancellation or renewal failure won.
+      if (definition.transactional) await handler;
+    }
   }
   // Cancellation ends claim ownership; the handler still occupies its local slot
   // until it settles or shutdown deliberately spends its grace.
-  await settleOrAbort(handler, abandon);
+  await settleOrAbort(userHandler, abandon);
 }
 
 function notificationWarning(error: unknown): void {
@@ -256,12 +306,14 @@ export async function runJobs(
           nextDefinition = (names.indexOf(claim.name) + 1) % names.length;
           counts.set(claim.name, (counts.get(claim.name) ?? 0) + 1);
           const task = executeClaim(
+            pool,
             execute,
             claim,
             byName.get(claim.name)!,
             leaseMs,
             abandon.signal,
             requestedAt,
+            databaseMs,
           )
             .catch(fail)
             .finally(() => {
