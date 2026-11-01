@@ -1,6 +1,6 @@
 # Documentation
 
-The current API is pgclear-only. Tenon ORM's facade is separate planned work.
+The Jobs API is pgclear-only. Tenon ORM implements its facade over the same engine.
 
 - [Quick start](../README.md): install, submit, and run work.
 - [API reference](api.md): definitions, record operations, schedules, errors, and runner options.
@@ -10,5 +10,4 @@ The current API is pgclear-only. Tenon ORM's facade is separate planned work.
 - [Architecture](architecture.md): ownership and source responsibilities.
 - [Development and release](development.md): tests, load profiles, packaging, and releases.
 
-The [Tenon implementation plan](implementation-plan.md) describes future ORM work, not additional
-current APIs. Remaining adoption checks are in [todo.md](../todo.md).
+The [Tenon integration](implementation-plan.md) describes ownership and acceptance checks. Remaining adoption checks are in [todo.md](../todo.md).

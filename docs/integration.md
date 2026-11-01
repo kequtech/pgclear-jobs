@@ -72,12 +72,24 @@ Forward `runJobs` options and its promise directly. pgclear-jobs owns startup, d
 maintenance, notifications, graceful shutdown, handler cancellation, and driver cleanup. Startup and
 operational failures reject that promise. The engine leaves the shared pool open.
 
+Forward `onReady` unchanged with the other runner options. Jobs 0.1.1 invokes it once after schema
+validation and awaits it before starting dispatch, maintenance, or notifications. This is a startup
+notification, separate from the worker lifetime and ongoing health. Callback failure rejects startup
+with its original error; abort interrupts a pending callback and observes late rejection. Integrations
+need no readiness probe, timer, listener check, or additional lifecycle promise.
+
 A query library may check its own enablement/open state before forwarding. The application connects
 its process signals and supervision, requests shutdown, awaits the worker, then closes the database.
 Keep queue algorithms and worker lifecycle inside pgclear-jobs.
 
 ## Tenon ORM
 
-The Jobs package contains no Tenon module or dependency. Tenon's planned `db.jobs`/`tx.jobs` API is
-not implemented here. See the [handoff plan](implementation-plan.md) for its binding, cancellation
-forwarding, migration generation, and acceptance checks.
+Tenon ORM implements `defineJob`, `db.jobs`, transactional `tx.jobs`, disabled-feature checks,
+transaction-options forwarding, and application migration generation. Its binding supplies the
+existing pool and guarded ORM scopes to this engine. This package contains no Tenon dependency.
+
+With Jobs 0.1.1 installed, `db.jobs.run(definitions, { signal, onReady })` forwards the startup callback
+through the shared `RunnerOptions` type. Use one compatible pgclear package instance across the
+application, Tenon, and Jobs; when testing local tarballs, ensure transitive dependencies select the
+same artifacts as direct dependencies. See the [integration responsibilities](implementation-plan.md)
+for ownership and acceptance checks.

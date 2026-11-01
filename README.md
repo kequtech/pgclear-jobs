@@ -58,8 +58,14 @@ The application loads its own environment before creating the pool. The migratio
 
 A runner owns claiming, heartbeats, retries, schedule advancement, retention, notifications, and
 worker shutdown. It processes only the supplied definitions, with one unfinished handler at a time
-by default. Observe its promise: database and cleanup failures reject it for application supervision.
+by default. Observe its promise: runner infrastructure and managed-transaction failures reject it
+for application supervision.
 The runner leaves the application pool open.
+
+HTTP hosts can use `onReady` to observe startup separately from the worker's lifetime promise.
+It runs once after storage validation and is awaited before dispatch. Continue supervising the
+worker promise for later failures; readiness does not report ongoing health or listener availability.
+See [startup readiness](docs/api.md#startup-readiness).
 
 ## Submit events or request current state
 
@@ -147,5 +153,5 @@ your dependencies: JavaScript that ignores cancellation can continue after its c
 - [Integration](docs/integration.md): bind another pgclear-backed query API to this engine.
 - [Architecture](docs/architecture.md) and [development](docs/development.md).
 
-The package has no ORM dependency. Tenon ORM will own its thin facade; that work is tracked in the
-[implementation plan](docs/implementation-plan.md).
+The package has no ORM dependency. Tenon ORM exposes its thin `db.jobs`/`tx.jobs` facade over this
+engine. See the [integration contract](docs/integration.md) and [integration responsibilities](docs/implementation-plan.md).

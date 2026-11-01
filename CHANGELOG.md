@@ -1,6 +1,12 @@
 # Changelog
 
-## 0.1.0 — Unreleased
+## 0.1.1 — Unreleased
+
+- Add optional, awaited `onReady` notification after storage validation and before worker dispatch.
+  Startup callback failures preserve their original errors; shutdown interrupts pending callbacks
+  and observes later rejections. Query-library integrations forward the option unchanged.
+
+## 0.1.0
 
 - Typed, inert definitions with saved execution/retry policy and validated JSON payloads.
 - Independent/stable-ID submissions, bounded bulk insertion, and keyed requests with one coalesced

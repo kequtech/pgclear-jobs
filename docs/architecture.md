@@ -14,8 +14,8 @@ committed work and own their worker lifecycle.
 | Query-library integration | Supply the existing pool, exact query scope, and real transaction opener                     |
 
 There is no ORM dependency, global pool, mutable queue registry, or per-handler adapter. The public
-integration factory binds another pgclear-backed query API to the same engine. Tenon ORM's facade
-belongs in Tenon, with no copied queue logic.
+integration factory binds another pgclear-backed query API to the same engine. Tenon ORM implements its facade
+without copying queue logic.
 
 One reserved `pgclear_jobs` schema stores jobs, attempts, schedules, and a compatibility marker.
 Installation/removal is explicit. One concrete up/down SQL pair serves both the standalone command
@@ -29,7 +29,8 @@ then invokes handlers outside the claim statement.
 
 An ordinary handler has a separate completion statement. A transactional handler uses a fresh real
 transaction for its application writes and fenced successful completion. Handler errors roll back
-before failure/retry bookkeeping. Unknown commits and cleanup failures propagate to supervision.
+before failure/retry bookkeeping. Managed-transaction commit and cleanup failures propagate to supervision;
+exceptions from independently opened application transactions remain handler failures under retry policy.
 
 Handler settlement and transaction settlement are tracked separately. A cancelled driver scope can
 roll back while uncooperative JavaScript continues; that JavaScript retains its local slot. Attempt
@@ -54,5 +55,5 @@ transactions. Automatic cleanup uses a completed/cancelled-only index and bounde
 | `integration.ts`, `pgclear.ts`                          | Query/transaction bindings and the native binding                                     |
 
 The [reliability contract](storage-and-reliability.md) explains the failure boundaries. The
-[integration guide](integration.md) defines the narrow query-library contract. Future Tenon work is
-separate from the current API and tracked in the [implementation plan](implementation-plan.md).
+[integration guide](integration.md) defines the narrow query-library contract. Tenon integration ownership and
+acceptance checks are described in the [integration responsibilities](implementation-plan.md).

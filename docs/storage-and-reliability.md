@@ -58,6 +58,12 @@ Only operations on that supplied scope participate. Other pools and external cal
 Retain idempotency for effects outside the transaction and for distinct submissions of the same
 business operation. Await every transaction operation and do not retain the scope after use.
 
+Exceptions escaping a handler become ordinary attempt failures under saved retry policy. This
+includes a driver error from a transaction the application opens independently inside the handler.
+The driver does not replay transactions, but a retry of the whole handler can repeat that application
+logic. Failures opening, committing, or cleaning up the Jobs-managed transaction outside handler
+invocation instead reach worker supervision. A driver error's class alone does not select that path.
+
 Transactional handlers hold a pool connection and application locks until commit/rollback. Claims,
 heartbeats, maintenance, and other application work need additional connections. Keep transactions
 short; an external call inside one also holds those resources while waiting.
@@ -65,9 +71,10 @@ short; an external call inside one also holds those resources while waiting.
 ## Uncertain responses
 
 A rejected operation does not prove rollback: PostgreSQL may have committed while its response was
-lost. pgclear errors propagate without automatic replay. Managed commit uncertainty reports
-`PGCLEAR_COMMIT_UNKNOWN`; cleanup can also produce aggregate errors. Preserve those errors in
-supervision rather than converting them to normal handler failures.
+lost. At the record API boundary, pgclear errors propagate without automatic transaction replay.
+Using that API inside a handler still subjects escaping exceptions to the handler retry policy.
+An uncertain Jobs-managed commit reports `PGCLEAR_COMMIT_UNKNOWN` to supervision; managed cleanup
+can also produce aggregate errors. Preserve those infrastructure errors in the supervising code.
 
 For submissions, generate a stable UUID outside the uncertain transaction, retain it, and reconcile
 with `send`/`get`. The original record deduplicates that ID while retained. This reconciles the job,
@@ -114,6 +121,11 @@ listener is unavailable, reconciliation is capped at one second.
 
 ## Shutdown and supervision
 
+`onReady` notifies a host after storage compatibility is checked, before background work starts.
+The runner awaits the callback; the lifetime promise remains the source of later failures. Startup
+readiness does not establish listener connectivity or ongoing queue progress. Abort during a pending
+callback stops startup and observes any late rejection. See [startup readiness](api.md#startup-readiness).
+
 Call `runJobs` to start. Observe its promise immediately, through an awaited worker entry point or
 an application's existing supervisor. Abort its signal to stop new claiming and maintenance.
 Active work gets `shutdownTimeoutMs` to finish; then handler signals abort and renewals stop.
@@ -124,9 +136,11 @@ Grace expiry bounds waiting for arbitrary handlers, not total wall-clock shutdow
 operations can add their remaining timeout and cleanup time. JavaScript that ignores cancellation
 may outlive the worker promise. Use process supervision/isolation when that matters.
 
-Database faults stop the runner, cancel active work, and reject its promise. A supervisor can restart
-it; expired claims recover according to saved policy. Stop and await workers before closing their
-pool. The query-library integration forwards this lifecycle without a second shutdown implementation.
+Runner infrastructure and Jobs-managed transaction faults stop the runner, cancel active work, and
+reject its promise. A supervisor can restart it; expired claims recover according to saved policy.
+Ordinary handler exceptions follow their retry policy, including errors from independently managed
+transactions. Stop and await workers before closing their pool. The query-library integration forwards
+this lifecycle without a second shutdown implementation.
 
 ## Retention and resource limits
 

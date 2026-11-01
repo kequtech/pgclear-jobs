@@ -62,6 +62,10 @@ test('packed core, migration SQL and integration types work with the required pg
       if (!definition.name || typeof jobs(pool).send !== 'function' ||
           typeof runJobs !== 'function' || typeof installJobs !== 'function') throw new Error('Invalid exports');
       if (!jobsMigration.up || !jobsMigration.down || typeof createJobsIntegration !== 'function') throw new Error('Missing migration/integration exports');
+      await runJobs(pool, [definition], {
+        signal: AbortSignal.abort(),
+        onReady() { throw new Error('A pre-aborted packaged worker announced readiness'); },
+      });
       await pool.close();
     `,
     );
@@ -100,7 +104,7 @@ test('packed core, migration SQL and integration types work with the required pg
           await jobs(tx).send(definition, payload);
         }
       });
-      void runJobs(pool, [definition, transactional]);
+      void runJobs(pool, [definition, transactional], { onReady: async () => {} });
       type Scope = { execute: Execute };
       type Database = Scope & { pool: typeof pool };
       const api = createJobsIntegration<Database, Scope>({
@@ -111,6 +115,8 @@ test('packed core, migration SQL and integration types work with the required pg
       const custom = api.defineJob({name: 'custom', transactional: true, async handler(payload: {id: string}, {tx}) {
         await tx.execute('SELECT $1::text', [payload.id]);
       }});
+      const integratedDatabase: Database = { pool, execute: (text, values) => pool.queryClassic(text, values) };
+      void api.runJobs(integratedDatabase, [custom], { onReady() {} });
       await jobs(pool).send(custom, {id: 'custom'});
       // @ts-expect-error Integration payload types remain enforced in shipped declarations.
       await jobs(pool).send(custom, {id: 1});

@@ -1,7 +1,8 @@
-# Tenon ORM integration plan
+# Tenon ORM integration
 
 pgclear-jobs is the pgclear-only Jobs engine. It has no ORM dependency. Its current public API and
-integration factory are implemented; the Tenon facade below is proposed work in the ORM repository.
+integration factory are implemented. Tenon ORM implements the facade described here; this document
+records its ownership boundaries and acceptance checks.
 
 ## Boundaries
 
@@ -19,19 +20,19 @@ listeners. Importing libraries and defining jobs remain inert.
 The package/repository/source is pgclear-jobs; storage is `pgclear_jobs`. Existing configured
 connections are preserved. The old `tenon_jobs` development namespace is not migrated automatically.
 
-## Implementation sequence
+## Integration responsibilities
 
-1. **Forward transaction options.** Extend `db.transaction(callback, options?)` and its internal
-   wrapper to forward existing pgclear transaction options, especially `signal` and `timeoutMs`,
+1. **Forward transaction options.** `db.transaction(callback, options?)` and its internal
+   wrapper forward existing pgclear transaction options, especially `signal` and `timeoutMs`,
    through acquisition, execution, and commit. Preserve original/aggregate driver errors.
-2. **Bind once.** Use `createJobsIntegration` from `pgclear-jobs/integration` with three capabilities:
+2. **Bind once.** Tenon uses `createJobsIntegration` from `pgclear-jobs/integration` with three capabilities:
    the existing root pool, SQL through the exact ORM query scope, and real ORM transactions.
    Preserve affected-row savepoints, serialized guarded operations, query observation, and scope
    expiry. Do not construct pools or ORM instances per handler or bypass guards via a raw transaction.
-3. **Expose the facade.** Re-export the ORM-typed `defineJob`, Jobs errors, and relevant types. Add
+3. **Expose the facade.** Tenon re-exports the ORM-typed `defineJob`, Jobs errors, and relevant types. It exposes
    `db.jobs` for record/worker operations and restricted `tx.jobs` for transactional record operations.
    Transaction scopes cannot start workers or install storage.
-4. **Enable explicitly.** Add `jobs?: boolean`, default false. Keep stable facade types; disabled
+4. **Enable explicitly.** `jobs?: boolean` defaults to false. Keep stable facade types; disabled
    operations reject before SQL/acquisition and leave an existing transaction usable. Enabling Jobs
    enables its operations without creating tables or starting workers.
 5. **Generate migration files.** An explicit Jobs setup operation copies `jobsMigration.up/down`
@@ -41,10 +42,11 @@ connections are preserved. The old `tenon_jobs` development namespace is not mig
    selected published version. Do not commit machine-specific `file:` dependencies.
    An ordinary release/publication and a production pilot remain separate decisions.
 
-pgclear-jobs and pgclear currently provide the needed capabilities. No prerequisite runtime change
-in either package is known. Fix any newly demonstrated ownership bug in the package that owns it.
+Worker startup readiness belongs to pgclear-jobs: Jobs 0.1.1 adds `onReady` to the shared runner
+options. Tenon forwards it unchanged and consumes a Jobs version that provides it. Fix any newly
+demonstrated ownership bug in the package that owns it.
 
-## Proposed application API
+## Application API
 
 ```ts
 import { createTenon, defineJob } from '@kequtech/tenon-orm';
@@ -72,7 +74,9 @@ no separate Jobs imports or per-handler adapters.
 `db.jobs.run(definitions, options)` checks enablement/open state and forwards the integration's
 `runJobs`, its options, and its result. Jobs owns dispatch, maintenance, notifications, graceful
 shutdown, cancellation, and cleanup. Tenon adds no dispatcher, worker registry, drain loop, shutdown
-timer, or retry/error translation. Multiple runs remain independently controlled.
+timer, readiness probe, or retry/error translation. Multiple runs remain independently controlled.
+`onReady` runs after storage validation and before background work; continue observing the lifetime
+promise for later failure. Its semantics come directly from Jobs.
 
 ```ts
 const stop = new AbortController();
@@ -117,7 +121,7 @@ down. Stop producers/workers before removal and retain saved app migration files
 - Run an actual private application workflow with idempotency, cancellation, supervision, shutdown,
   and delayed/retrying work before relying on production behavior.
 
-Earlier ORM-specific regression examples remain in Jobs Git commit `3925fa4`. Port its affected-row
-savepoint, guarded concurrency, query-observation, scope-expiry, and producer/notification cases into
-Tenon. Native/custom-scope engine coverage remains in Jobs. Keep configuration, repositories,
-connections, and unrelated application work intact.
+Tenon owns regression coverage for affected-row savepoints, guarded concurrency, query observation,
+scope expiry, and its producer/notification boundary. Jobs retains native/custom-scope engine
+coverage, including readiness. Keep configuration, repositories, connections, and unrelated
+application work intact.

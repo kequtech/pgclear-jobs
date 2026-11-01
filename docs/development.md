@@ -50,7 +50,7 @@ comparison is retained in `test/load/claim-fairness-baseline.json`; it describes
 not current performance. Run the profiles for current measurements and validate real dependencies
 in the consuming application.
 
-## First publication
+## Releases
 
 Run `npm run check`, inspect `npm pack --dry-run`, and choose the package version before publishing:
 
@@ -62,7 +62,7 @@ Corrections require a new version: a published name/version cannot be reused, ev
 See [npm publish](https://docs.npmjs.com/cli/v11/commands/npm-publish/). Document API and schema
 compatibility changes, and keep saved application migrations immutable.
 
-Validate Tenon's query guards, configuration, migration generation, and lifecycle as that integration
-is implemented; follow the [implementation plan](implementation-plan.md). Application checks should
+Validate Tenon's query guards, configuration, migration generation, and lifecycle when changing the
+integration; follow the [integration responsibilities](implementation-plan.md). Application checks should
 exercise idempotency, cancellation, supervision, pool sizing, and rollout with retained, delayed,
 and retrying work.

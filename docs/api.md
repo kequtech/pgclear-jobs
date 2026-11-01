@@ -48,9 +48,9 @@ attempt history, and completion commit together. Handler errors roll back before
 bookkeeping. Refused completion after lost ownership also rolls back. The driver expires and rolls
 back the scope on cancellation even when the JavaScript handler ignores its signal.
 
-Calls through other pools, separate transactions, and external effects do not participate. No
-application transaction is automatically replayed. Database/commit/cleanup errors reject the worker;
-an uncertain commit may have persisted both writes and completion, or neither.
+Calls through other pools, separate transactions, and external effects do not participate. Failures
+opening, committing, or cleaning up the Jobs-managed transaction reject the worker; an uncertain
+managed commit may have persisted both writes and completion, or neither.
 See [reliability](storage-and-reliability.md).
 
 ### Errors from handlers
@@ -65,6 +65,12 @@ throw new JobError('Provider is busy', { retryAt: new Date(Date.now() + 60_000) 
 `retryAt` is a minimum time; backoff can delay it further. It does not extend the attempt budget.
 A permanent error cannot also specify `retryAt`. The constructor accepts `cause` through standard
 `ErrorOptions`. Persisted diagnostics contain sanitized, bounded error text; keep secrets out of it.
+
+An exception escaping the handler follows this retry policy even when it is a driver error from
+an independently opened application transaction. Such a transaction may already have committed.
+Reconcile durable application state before repeating effects or compensating external work. The
+stronger worker-rejection rule above concerns Jobs-managed transaction operations outside handler
+invocation; it is not a rule that every thrown `DriverError` bypasses handler retries.
 
 ## Record scope
 
@@ -194,6 +200,7 @@ await that promise before closing the application pool. The runner never closes 
 | Option               | Default                               | Meaning                                                                |
 | -------------------- | ------------------------------------- | ---------------------------------------------------------------------- |
 | `signal`             | None                                  | Request shutdown and stop new claims/maintenance                       |
+| `onReady`            | None                                  | Once after storage validation; awaited before dispatch                 |
 | `concurrency`        | `1`                                   | Maximum unfinished handlers, including cancelled ones; 1–1000          |
 | `notifications`      | None                                  | Dedicated listener connection string or pgclear connection options     |
 | `retentionMs`        | `604800000`                           | Completed/cancelled history window; `false` disables automatic cleanup |
@@ -216,6 +223,40 @@ Automatic retention affects only selected definitions. Failed/outstanding jobs r
 sharing definitions should agree on retention; the shortest window can delete shared history.
 A notification connection requires direct/session pooling and sits outside the query pool.
 Listener failures warn and fall back to polling. See [reliability](storage-and-reliability.md).
+
+### Startup readiness
+
+Since Jobs 0.1.1, `onReady?: () => void | Promise<void>` separates startup notification from the
+promise representing the worker's lifetime. The callback runs once after schema compatibility is
+checked and before dispatch, maintenance, or the optional listener starts. It is awaited; do not
+wait for a job to complete inside the callback. A thrown/rejected callback error rejects the worker
+with the original value. A pre-aborted worker or an abort during validation never announces readiness.
+
+Readiness means compatible storage was checked and dispatch is about to start. It does not confirm
+notification connectivity, every future SQL permission, or ongoing health. Continue observing the
+worker promise and route later failures to application supervision.
+
+For a host with separate startup and lifetime handling:
+
+```ts
+const ready = Promise.withResolvers<void>();
+const running = runJobs(pool, definitions, { signal, onReady: () => ready.resolve() });
+
+// superviseWorker is application code that observes lifetime errors and requests process shutdown.
+superviseWorker(running);
+await Promise.race([
+  ready.promise,
+  running.then(() => {
+    throw new Error('Worker stopped before startup completed.');
+  }),
+]);
+// Start accepting HTTP traffic here.
+```
+
+Aborting while an asynchronous callback is pending stops startup without waiting for it. The callback
+can outlive the worker; its own side effects must honor application cancellation. A later rejection
+is observed and does not become an unhandled rejection or restart dispatch. Tenon's `db.jobs.run`
+forwards this same option; it needs no separate readiness implementation.
 
 ## Schema setup
 

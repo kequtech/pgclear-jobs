@@ -16,6 +16,8 @@ import { executeAttempt } from './attempt.js';
 
 export interface RunnerOptions {
   readonly signal?: AbortSignal;
+  /** Called once after storage validation, before dispatch. Awaited; rejection fails startup. */
+  readonly onReady?: () => void | Promise<void>;
   /** Maximum unfinished handlers in this runner, including timed-out handlers. Default 1. */
   readonly concurrency?: number;
   /** Optional dedicated listener connection. Omit to use polling. */
@@ -59,6 +61,7 @@ export async function runJobsWithIntegration<Database, Tx>(
 ): Promise<void> {
   validateOptions(options, [
     'signal',
+    'onReady',
     'concurrency',
     'notifications',
     'pollIntervalMs',
@@ -68,6 +71,9 @@ export async function runJobsWithIntegration<Database, Tx>(
     'databaseTimeoutMs',
     'retentionMs',
   ]);
+  const onReady = options.onReady;
+  if (onReady !== undefined && typeof onReady !== 'function')
+    throw new TypeError('onReady must be a function.');
   const concurrency = integer(options.concurrency ?? 1, 'concurrency', 1, 1000);
   const notifications = options.notifications;
   if (
@@ -155,6 +161,14 @@ export async function runJobsWithIntegration<Database, Tx>(
   };
   try {
     await checkSchema(execute);
+    if (stop.signal.aborted) return;
+    if (onReady) {
+      const ready = Promise.resolve(onReady());
+      // The callback can request shutdown before returning its promise.
+      if (stop.signal.aborted) void ready.catch(() => {});
+      else await settleOrAbort(ready, stop.signal);
+    }
+    if (stop.signal.aborted) return;
     listening = startListener().catch(fail);
     maintenance = (async () => {
       let nextCleanup = 0;

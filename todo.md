@@ -5,10 +5,13 @@ factory are implemented. Keep changes tied to demonstrated reliability or applic
 
 ## Tenon ORM
 
-Follow the [implementation plan](docs/implementation-plan.md): transaction-options forwarding,
-one query/transaction binding, the thin `db.jobs`/`tx.jobs` facade, disabled behavior, and migration
-file generation. Validate actual ORM guards and lifecycle through packed or published packages.
-The current Jobs tests use native pgclear and custom scopes, not the future Tenon implementation.
+Tenon ORM implements its guarded query/transaction binding, `db.jobs`/`tx.jobs` facade,
+disabled-feature behavior, and application migration generation. Keep those integration checks in
+Tenon; Jobs retains native pgclear and custom-scope engine coverage.
+
+Jobs 0.1.1 adds the shared `onReady` startup callback for HTTP hosts. Validate it through Tenon's
+forwarded runner options using the selected package artifact. Continue supervising the lifetime
+promise after startup. See the [integration responsibilities](docs/implementation-plan.md).
 
 ## Application acceptance
 
@@ -26,12 +29,12 @@ The current Jobs tests use native pgclear and custom scopes, not the future Teno
 - Any intentional schema reset must account for lost jobs/history; saved application migration files
   remain immutable. Validate the deployment's transport/failover behavior where applicable.
 
-Publication can precede Tenon integration. Follow the application acceptance checks above as the
-integration is implemented. See [development and release](docs/development.md).
+Follow the application acceptance checks above as consuming workflows adopt Jobs. See [development and release](docs/development.md).
 
 ## Optional improvements when needed
 
-Worker readiness/progress reporting and structured `JobStateError` reasons may help administration
-and stall diagnosis. Add them in Jobs when a consuming workflow establishes the shape. Larger queue
+Continuous worker progress reporting and structured `JobStateError` reasons may help administration
+and stall diagnosis. Startup notification is available through `onReady`; ongoing health reporting
+remains a separate capability to shape around concrete needs. Larger queue
 features, alternate database backends, stored business results, and a plugin framework are outside
 current needs.
