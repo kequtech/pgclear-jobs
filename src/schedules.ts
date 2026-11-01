@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { CronExpressionParser } from 'cron-parser';
 import type { Pool } from '@kequtech/pgclear';
-import { executionPolicy, integer, serializePayload } from './definition.js';
+import { databaseText, executionPolicy, integer, serializePayload } from './definition.js';
 import type { JobDefinition } from './definition.js';
 import type { Execute } from './storage.js';
 
@@ -91,9 +91,7 @@ export async function saveSchedule<Payload>(
 ): Promise<Schedule<Payload>> {
   // Validate before SQL, then calculate against the database clock rather than the producer's clock.
   previewSchedule(options, { count: 1 });
-  const key = options.key ?? '';
-  if (typeof key !== 'string' || key.length > 500)
-    throw new TypeError('Schedule key must be at most 500 characters.');
+  const key = databaseText(options.key ?? '', 'Schedule key', 500);
   const missed = options.missed ?? 'once',
     overlap = options.overlap ?? 'skip';
   if (!['once', 'skip'].includes(missed) || !['skip', 'allow'].includes(overlap))

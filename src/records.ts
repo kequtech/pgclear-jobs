@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Executor, InputValue } from '@kequtech/pgclear';
-import { executionPolicy, integer, serializePayload } from './definition.js';
+import { databaseText, executionPolicy, integer, serializePayload } from './definition.js';
 import type { JobDefinition } from './definition.js';
 import { JobNotFoundError, JobStateError } from './errors.js';
 import { jobRecord, states } from './storage.js';
@@ -58,7 +58,7 @@ export class JobRecords {
       (
         await this.execute<{ id: string }>(
           'DELETE FROM tenon_jobs.schedules WHERE name = $1 AND key = $2 RETURNING id',
-          [definition.name, key],
+          [definition.name, databaseText(key, 'Schedule key', 500)],
         )
       ).rows.length === 1
     );
@@ -69,12 +69,7 @@ export class JobRecords {
     payload: NoInfer<Payload>,
     options: SendOptions = {},
   ): Promise<Job<Payload>> {
-    if (
-      options.key !== undefined &&
-      (typeof options.key !== 'string' || options.key.length > 500)
-    ) {
-      throw new TypeError('key must be a string of at most 500 characters.');
-    }
+    const key = options.key === undefined ? null : databaseText(options.key, 'key', 500);
     if (options.runAt !== undefined && options.delayMs !== undefined)
       throw new TypeError('Use runAt or delayMs, not both.');
     const result = await this.execute<{ record: StoredJob }>(
@@ -88,7 +83,7 @@ export class JobRecords {
         randomUUID(),
         definition.name,
         serializePayload(payload),
-        options.key ?? null,
+        key,
         options.runAt === undefined ? null : timestamp(options.runAt),
         JSON.stringify(executionPolicy(definition)),
         integer(options.delayMs ?? 0, 'delayMs', 0),
@@ -118,7 +113,7 @@ export class JobRecords {
        ORDER BY created_at, id LIMIT $4`,
       [
         definition.name,
-        options.key ?? null,
+        options.key === undefined ? null : databaseText(options.key, 'key', 500),
         options.states === undefined ? null : JSON.stringify(options.states),
         integer(options.limit ?? 100, 'limit', 1, 1000),
       ],

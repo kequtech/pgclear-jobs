@@ -15,3 +15,5 @@
 - Durable cron schedules, time zones, previews, bounded catch-up and overlap policies through the existing runner.
 - Per-definition local concurrency and database-clock relative submission delays.
 - Schema version 3 adds schedules and job occurrence metadata without rewriting existing policies.
+- Recheck claim expiry after row-lock waits; account for delayed claim/heartbeat responses and bound local leases.
+- Reject PostgreSQL-incompatible payload text before SQL and sanitize persisted error messages.

@@ -62,11 +62,16 @@ export async function renewClaim(
   claim: Claim,
   leaseMs: number,
 ): Promise<boolean> {
+  // Check time after acquiring the row lock. A lock-only wait does not cause
+  // PostgreSQL to re-evaluate predicates already checked on the target row.
   const { rows } = await execute<{ id: string }>(
-    `UPDATE tenon_jobs.jobs SET lease_until = LEAST(deadline,
+    `WITH owned AS MATERIALIZED (
+       SELECT id, lease_until, deadline FROM tenon_jobs.jobs
+       WHERE id = $1::uuid AND claim_token = $2::uuid AND state = 'running' FOR UPDATE
+     ) UPDATE tenon_jobs.jobs j SET lease_until = LEAST(owned.deadline,
        clock_timestamp() + $3::double precision * interval '1 millisecond')
-     WHERE id = $1::uuid AND claim_token = $2::uuid AND state = 'running'
-       AND lease_until > clock_timestamp() AND deadline > clock_timestamp() RETURNING id`,
+     FROM owned WHERE j.id = owned.id
+       AND owned.lease_until > clock_timestamp() AND owned.deadline > clock_timestamp() RETURNING j.id`,
     [claim.id, claim.claim_token, leaseMs],
   );
   return rows.length === 1;
@@ -79,16 +84,19 @@ export async function finishClaim(
   error: string | JobError | null,
 ): Promise<boolean> {
   const { rows } = await execute<{ id: string }>(
-    `WITH finished AS (
+    `WITH owned AS MATERIALIZED (
+      SELECT id, lease_until, deadline FROM tenon_jobs.jobs
+      WHERE id = $1::uuid AND claim_token = $2::uuid AND state = 'running' FOR UPDATE
+    ), finished AS (
       UPDATE tenon_jobs.jobs j SET ${outcomeUpdate(
         '$3::text IS NULL',
         `$4 AND ${remainingAttempts}`,
         '$3',
         `GREATEST(${retryTime}, $5::timestamptz)`,
       )}
-      WHERE id = $1::uuid AND claim_token = $2::uuid AND state = 'running'
-        AND lease_until > clock_timestamp() AND ($3::text IS NOT NULL OR deadline > clock_timestamp())
-      RETURNING id
+      FROM owned WHERE j.id = owned.id
+        AND owned.lease_until > clock_timestamp() AND ($3::text IS NOT NULL OR owned.deadline > clock_timestamp())
+      RETURNING j.id
     ), history AS (
       UPDATE tenon_jobs.attempts SET finished_at = clock_timestamp(), error = $3,
         outcome = CASE WHEN $3::text IS NULL THEN 'completed' ELSE 'failed' END

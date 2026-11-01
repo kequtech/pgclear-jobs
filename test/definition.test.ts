@@ -28,10 +28,21 @@ test('invalid policies and lossy JSON payloads fail before database access', () 
   assert.throws(() => defineJob({ name: ' ', handler() {} }), TypeError);
   const circular: { self?: unknown } = {};
   circular.self = circular;
-  for (const value of [undefined, { x: undefined }, NaN, 1n, new Date(), [, 1], circular]) {
+  for (const value of [
+    undefined,
+    { x: undefined },
+    NaN,
+    1n,
+    new Date(),
+    [, 1],
+    circular,
+    '\0',
+    '\ud800',
+    { ['\udfff']: 1 },
+  ]) {
     assert.throws(() => serializePayload(value), TypeError);
   }
-  assert.deepEqual(JSON.parse(serializePayload({ data: [1, true, null, 'ok'] })), {
-    data: [1, true, null, 'ok'],
+  assert.deepEqual(JSON.parse(serializePayload({ data: [1, true, null, 'ok 😀'] })), {
+    data: [1, true, null, 'ok 😀'],
   });
 });

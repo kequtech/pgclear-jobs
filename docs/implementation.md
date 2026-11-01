@@ -44,6 +44,8 @@ runtime schema validation on stored data. Handlers should validate untrusted pay
 
 Payloads must be JSON primitives, dense arrays or plain objects, including `null`. Undefined,
 nonfinite numbers, bigint, cycles, Dates and other class instances are rejected before SQL.
+Text values and object keys containing NUL or unpaired Unicode surrogates are also rejected;
+PostgreSQL JSONB cannot preserve them. Names and outstanding/schedule keys share this validation.
 PostgreSQL's normal JSONB limits also apply. Data must survive a JSON round trip; no driver-specific
 value types are stored in payloads. Timestamps in public records are JavaScript Dates.
 
@@ -101,13 +103,21 @@ CPU-blocking work should run separately and can still block its own heartbeat.
 
 Claims use a short `FOR UPDATE SKIP LOCKED` statement and a fresh UUID token per attempt. No
 transaction or row lock spans a handler. Every completion, failure and renewal checks the current
-token and lease; successful completion also checks the execution deadline. History writes and
+token and lease after acquiring the row lock; successful completion also checks the execution deadline.
+A lock-only wait must not allow a time check made before the wait to authorize an expired claim.
+History writes and
 state transitions happen atomically. Throwing retries according to stored policy; returning
 completes the attempt. Error messages are truncated to 4000 characters without stacks or payloads.
+NUL and unpaired surrogates in errors become replacement characters so diagnostics remain persistable.
 Applications must keep credentials and sensitive data out of thrown messages.
 
 Heartbeats renew the lease up to the maximum execution deadline. A runner that loses ownership
-signals cancellation and stops recording outcomes. An unfinished handler continues occupying its
+signals cancellation and stops recording outcomes. Local lease timers also signal cancellation
+if renewal confirmation is delayed. Claim and renewal query round trips count against local budgets,
+using a monotonic clock without assuming synchronized worker/database clocks. A response that has
+spent its lease or execution budget never starts a handler. This is deliberately conservative:
+pool waits may consume an attempt without executing it, so allow ample lease time for database latency.
+An unfinished handler continues occupying its
 local slot after cancellation, timeout or ownership loss, until it actually settles. Per-definition
 concurrency holds those same slots; a saturated definition does not prevent other definitions from running. A handler
 ignoring cancellation can therefore stall its runner's slots; use process supervision when needed.
@@ -214,6 +224,30 @@ database errors or close a borrowed pool. Owned pools and listeners are disposed
 Terminal records and attempt history are retained indefinitely. Job records expose state, attempts,
 last failure, policy and lifecycle times. A worker registry, overdue-work statistics,
 cleanup, retry/removal APIs and permanent submission idempotency remain future work.
+
+### Applying it in existing apps
+
+The first trial should be a small, repeatable maintenance job alongside the existing queue. For
+example, Blockparty's hourly cleanup fits ordinary definitions, schedules and bounded retries.
+Keep handler effects idempotent, observe the runner's rejection through app supervision, and await
+its shutdown before closing a borrowed pool. Register recurring producers at startup, not on every
+request. Keep submission transactions short; a keyed collision locks the outstanding row until the
+caller commits, which can delay that job's heartbeat or completion.
+
+Several existing app contracts need additional library support before a direct migration:
+
+| Workflow                                     | Current gap and consequence                                                                                                                                                                                                                                |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Site editorial debounce and updated requests | Keyed `send` preserves existing payload and timing. A future atomic pending upsert should define how running work receives a follow-up; a read followed by update/reschedule does not provide that guarantee.                                              |
+| Mail notification fan-out                    | Mail submits a batch transactionally with IDs derived from message deliveries. There is no bulk API or caller-selected job ID here. Outstanding keys do not prevent another submission after completion.                                                   |
+| Site generated-note status                   | Handlers return no stored result. Keep result IDs in app-owned records or add an explicit typed result contract before replacing status queries.                                                                                                           |
+| Long-lived operations                        | There is no supported manual retry, terminal cleanup, cursor pagination or aggregate state counts. These are the next general-purpose usability improvements; retained history otherwise grows indefinitely and lists cannot traverse more than 1000 rows. |
+
+Prioritize a small retention/inspection/retry API and a well-defined pending upsert over worker
+registries, event frameworks or another configuration layer. Permanent submission deduplication
+must define its retention lifetime; it cannot promise exactly-once external effects. Per-definition
+concurrency remains local, so multiple runners cannot replace an app's distributed exclusivity
+requirement without a separate persisted contract.
 
 This version has behavioral PostgreSQL tests, including a killed worker process, listener reconnection,
 transactional notification delivery, recurring schedule contention/rollback and preserving upgrades from schema version 1. Network partitions,

@@ -44,10 +44,23 @@ async function executeClaim(
   definition: JobDefinition<unknown>,
   leaseMs: number,
   abandon: AbortSignal,
+  requestedAt: number,
 ): Promise<void> {
+  // Fail closed if transport/pool delay spent the claim's budget. Monotonic time
+  // avoids depending on synchronization between the database and worker clocks.
+  const elapsed = performance.now() - requestedAt;
+  const remainingLease = Math.min(leaseMs, claim.policy.executionTimeoutMs) - elapsed;
+  if (remainingLease <= 0 || abandon.aborted) return;
   const controller = new AbortController();
   const monitors = new AbortController();
   const signal = AbortSignal.any([controller.signal, abandon]);
+  let leaseTimer: ReturnType<typeof setTimeout> | undefined;
+  const watchLease = (remaining: number) => {
+    clearTimeout(leaseTimer);
+    if (remaining <= 0) controller.abort(new Error('Job lease expired'));
+    else leaseTimer = setTimeout(() => controller.abort(new Error('Job lease expired')), remaining);
+  };
+  watchLease(remainingLease);
   const handler = Promise.resolve().then(async () => {
     if (signal.aborted) return;
     try {
@@ -64,19 +77,25 @@ async function executeClaim(
     }
   });
   const heartbeat = async () => {
+    let interval = Math.min(leaseMs / 3, remainingLease / 2);
     while (!monitors.signal.aborted) {
-      await pause(Math.max(1, Math.floor(leaseMs / 3)), monitors.signal);
+      await pause(Math.max(1, Math.floor(interval)), monitors.signal);
       if (monitors.signal.aborted) break;
+      const renewingAt = performance.now();
       if (!(await renewClaim(execute, claim, leaseMs))) {
         controller.abort(new Error('Job claim lost'));
         break;
       }
+      if (signal.aborted) break;
+      const remaining = leaseMs - (performance.now() - renewingAt);
+      watchLease(remaining);
+      interval = Math.min(leaseMs / 3, remaining / 2);
     }
   };
   const beat = heartbeat();
   const timeout = setTimeout(
     () => controller.abort(new Error('Job execution deadline reached')),
-    claim.policy.executionTimeoutMs,
+    Math.max(1, claim.policy.executionTimeoutMs - elapsed),
   );
   try {
     const result = await Promise.race([settleOrAbort(handler, signal), beat]);
@@ -86,6 +105,7 @@ async function executeClaim(
   } finally {
     monitors.abort();
     controller.abort(new Error('Attempt finished'));
+    clearTimeout(leaseTimer);
     clearTimeout(timeout);
     await beat;
   }
@@ -211,6 +231,7 @@ export async function runJobs(
         (name) => (counts.get(name) ?? 0) < (byName.get(name)!.concurrency ?? concurrency),
       );
       if (active.size < concurrency && available.length) {
+        const requestedAt = performance.now();
         const { claim, delayMs } = await claimJob(execute, available, leaseMs);
         if (stop.signal.aborted) break;
         if (claim) {
@@ -221,6 +242,7 @@ export async function runJobs(
             byName.get(claim.name)!,
             leaseMs,
             abandon.signal,
+            requestedAt,
           )
             .catch(fail)
             .finally(() => {

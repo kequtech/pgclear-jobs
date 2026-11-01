@@ -43,10 +43,10 @@ export class JobError extends Error {
 
 export function errorText(error: unknown): string {
   try {
-    return (error instanceof Error ? `${error.name}: ${error.message}` : String(error)).slice(
-      0,
-      4000,
-    );
+    return (error instanceof Error ? `${error.name}: ${error.message}` : String(error))
+      .slice(0, 4000)
+      .toWellFormed()
+      .replaceAll('\0', '\uFFFD');
   } catch {
     return 'Handler threw an unprintable error';
   }
