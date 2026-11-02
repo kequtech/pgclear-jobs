@@ -83,13 +83,18 @@ export async function renewClaim(
   return rows.length === 1;
 }
 
+export interface AttemptOutcome {
+  readonly state: 'completed' | 'pending' | 'failed';
+  readonly runAt: Date;
+}
+
 /** All outcomes are fenced by the current token and live lease. */
-export async function finishClaim(
+export async function finishAttempt(
   execute: Execute,
   claim: Claim,
   error: string | JobError | null,
-): Promise<boolean> {
-  const { rows } = await execute<{ id: string }>(
+): Promise<AttemptOutcome | null> {
+  const { rows } = await execute<{ state: AttemptOutcome['state']; run_at: string }>(
     `WITH owned AS MATERIALIZED (
       SELECT id, lease_until, deadline FROM pgclear_jobs.jobs
       WHERE id = $1::uuid AND claim_token = $2::uuid AND state = 'running' FOR UPDATE
@@ -102,12 +107,12 @@ export async function finishClaim(
       )}
       FROM owned WHERE j.id = owned.id
         AND owned.lease_until > clock_timestamp() AND ($3::text IS NOT NULL OR owned.deadline > clock_timestamp())
-      RETURNING j.id
+      RETURNING j.id, j.state, to_jsonb(j.run_at) AS run_at
     ), history AS (
       UPDATE pgclear_jobs.attempts SET finished_at = clock_timestamp(), error = $3,
         outcome = CASE WHEN $3::text IS NULL THEN 'completed' ELSE 'failed' END
       WHERE token = $2::uuid AND job_id IN (SELECT id FROM finished)
-    ) SELECT id FROM finished`,
+    ) SELECT state, run_at FROM finished`,
     [
       claim.id,
       claim.claim_token,
@@ -116,7 +121,15 @@ export async function finishClaim(
       error instanceof JobError ? error.retryAt : null,
     ],
   );
-  return rows.length === 1;
+  return rows[0] ? { state: rows[0].state, runAt: new Date(rows[0].run_at) } : null;
+}
+
+export async function finishClaim(
+  execute: Execute,
+  claim: Claim,
+  error: string | JobError | null,
+): Promise<boolean> {
+  return (await finishAttempt(execute, claim, error)) !== null;
 }
 
 /** Recovery is bounded and serializes with completion and heartbeat updates. */

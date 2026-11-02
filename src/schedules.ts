@@ -3,7 +3,7 @@ import { CronExpressionParser } from 'cron-parser';
 import type { Pool } from '@kequtech/pgclear';
 import { databaseText, integer, serializePayload, validateOptions } from './validation.js';
 import { executionPolicy } from './definition.js';
-import type { ExecutionPolicy, JobDefinition } from './definition.js';
+import type { ExecutionPolicy, JobSpec } from './definition.js';
 import type { Execute } from './storage.js';
 
 export interface ScheduleOptions {
@@ -78,7 +78,7 @@ function record<Payload>(row: StoredSchedule): Schedule<Payload> {
 
 export async function saveSchedule<Payload>(
   execute: Execute,
-  definition: JobDefinition<Payload, never>,
+  definition: JobSpec<Payload>,
   payload: NoInfer<Payload>,
   options: ScheduleOptions,
 ): Promise<Schedule<Payload>> {
@@ -113,7 +113,7 @@ export async function saveSchedule<Payload>(
 
 export async function listSchedules<Payload>(
   execute: Execute,
-  definition: JobDefinition<Payload, never>,
+  definition: JobSpec<Payload>,
   limit: number,
 ): Promise<readonly Schedule<Payload>[]> {
   const { rows } = await execute<{ record: StoredSchedule }>(

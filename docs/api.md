@@ -4,6 +4,22 @@ Import definitions, record operations, errors, setup functions, and the runner f
 `@kequtech/pgclear-jobs`. Import SQL from `/migrations` and query-library bindings from `/integration`.
 The package is ESM and requires a compatible `@kequtech/pgclear` peer.
 
+## Producer contracts and workers
+
+`defineJob<Payload>({ name, ...policy })` returns an immutable `JobSpec<Payload>` without a handler.
+`JobSpecOptions` accepts the name and execution/retry policy fields. Producers can share this small
+module without importing application handlers. All record/schedule operations accept specifications
+as well as existing inline definitions, preserving payload typing.
+
+`defineWorker(spec, { handler, transactional?, concurrency? })` returns an executable
+`JobDefinition<Payload, Tx>`. The handler payload is inferred from the specification; transactional
+context uses native pgclear or the integration's transaction type. Worker options cannot change the
+name or submission policy. `WorkerOptions` is exported for reusable worker factories. Passing an
+inline definition as a specification also works; only its metadata is reused.
+
+Runners require executable definitions; handler-free or malformed registrations are rejected before
+pool access. Existing `defineJob({ name, handler, ...options })` calls remain supported.
+
 ## Definitions
 
 ```ts
@@ -15,8 +31,9 @@ const refresh = defineJob({
 });
 ```
 
-`refreshProject` is application code. Definitions are immutable and do not connect or submit work.
-Names must contain 1–200 characters and cannot be blank. Unknown definition options are rejected.
+`refreshProject` is application code. Definitions and producer specifications are immutable and do
+not connect or submit work. Names must contain 1–200 characters and cannot be blank. Unknown
+definition options are rejected.
 Handlers return `void` or `Promise<void>`; persist business results in application records.
 
 | Option               | Default         | Meaning                                                |
@@ -66,8 +83,9 @@ throw new JobError('Provider is busy', { retryAt: new Date(Date.now() + 60_000) 
 A permanent error cannot also specify `retryAt`. The constructor accepts `cause` through standard
 `ErrorOptions`. Persisted diagnostics contain sanitized, bounded error text; keep secrets out of it.
 
-An exception escaping the handler follows this retry policy even when it is a driver error from
-an independently opened application transaction. Such a transaction may already have committed.
+Unless an [explicit handler-error policy](#observation-and-error-policy) stops the worker, an exception
+escaping the handler follows this retry policy even when it is a driver error from an independently
+opened application transaction. Such a transaction may already have committed.
 Reconcile durable application state before repeating effects or compensating external work. The
 stronger worker-rejection rule above concerns Jobs-managed transaction operations outside handler
 invocation; it is not a rule that every thrown `DriverError` bypasses handler retries.
@@ -199,6 +217,8 @@ await that promise before closing the application pool. The runner never closes 
 
 | Option               | Default                               | Meaning                                                                |
 | -------------------- | ------------------------------------- | ---------------------------------------------------------------------- |
+| `onEvent`            | None                                  | Best-effort local observation; not awaited                             |
+| `onHandlerError`     | Continue                              | Explicit handler-error decision after managed rollback                 |
 | `signal`             | None                                  | Request shutdown and stop new claims/maintenance                       |
 | `onReady`            | None                                  | Once after storage validation; awaited before dispatch                 |
 | `concurrency`        | `1`                                   | Maximum unfinished handlers, including cancelled ones; 1–1000          |
@@ -224,9 +244,66 @@ sharing definitions should agree on retention; the shortest window can delete sh
 A notification connection requires direct/session pooling and sits outside the query pool.
 Listener failures warn and fall back to polling. See [reliability](storage-and-reliability.md).
 
+### Observation and error policy
+
+`RunnerOptions` includes `RunnerHooks`. Neither hook receives an attached job payload or transaction.
+Errors retain their original identity and may contain application data; redact them before logging
+and do not mutate them. The related types are exported from the package root.
+
+`onEvent?: (event: RunnerEvent) => void | Promise<void>` is best-effort and is not awaited. Throws
+and rejections warn with `PGCLEAR_JOBS_OBSERVER_FAILED` without changing job outcomes. Unresolved
+observer promises cannot hold slots or prevent shutdown; synchronous work still occupies the event loop.
+
+| Event `type`       | Meaning                                                                                               |
+| ------------------ | ----------------------------------------------------------------------------------------------------- |
+| `attemptStarted`   | This runner is invoking the handler after acquiring its execution scope                               |
+| `attemptCompleted` | PostgreSQL acknowledged completion, including managed commit when applicable                          |
+| `attemptFailed`    | Failure bookkeeping was acknowledged; includes original `error` and saved `retryAt`                   |
+| `attemptAbandoned` | No outcome was confirmed after local cancellation; includes `reason`                                  |
+| `runnerFailed`     | Startup/runtime/cleanup failed; emitted once with the final error before the lifetime promise rejects |
+
+Attempt events carry `AttemptInfo`: `id`, `name`, `attempt`, `maxAttempts`, and nullable `scheduledFor`.
+`retryAt` is the saved Date including backoff/jitter, or null for terminal failure. Abandonment reasons
+are `leaseLost`, `deadlineExceeded`, and `runnerStopped`. `runnerFailed` may include the originating
+`attempt`; concurrent failures are preserved in an `AggregateError`. Identity metadata and Dates are
+detached from execution metadata.
+
+Events describe this runner, not expired-claim recovery or other runners, and are not durable.
+Process death can lose events, and abandonment before invocation can have no start event. Uncertain
+commits emit no successful outcome; confirmed completion can precede a cleanup failure. Stored
+jobs/application records remain authoritative. Invalid configuration rejects without promising an event.
+
+`onHandlerError?: (failure: HandlerFailure) => HandlerErrorAction | Promise<HandlerErrorAction>` runs
+for an escaping handler exception, after confirmed Jobs-managed rollback and before failure
+bookkeeping. `HandlerFailure` contains `AttemptInfo`, original `error: unknown`, the attempt `signal`,
+and `transactional: boolean`. Managed commit/rollback/cleanup failures bypass this hook and reject
+the worker directly.
+
+- `continue` (the default) preserves ordinary `JobError` and saved retry behavior; it does not force
+  another attempt for a permanent or exhausted job.
+- `stop` rejects with the original thrown value before failure bookkeeping, leaving the claim for
+  lease recovery rather than permanently pausing or failing the job.
+- A thrown/rejected policy or invalid JavaScript return value rejects with an `AggregateError`
+  containing both the handler and policy errors.
+
+Asynchronous decisions are awaited while ownership is maintained. Deadline, lease loss, and shutdown
+interrupt the wait, prevent stale bookkeeping, and observe late rejections. The callback can outlive
+the wait, so honor its signal for side effects. Independently opened application transactions may
+already have committed; this hook adds no atomicity to them. See [reliability](storage-and-reliability.md).
+
+TypeScript 6 async callbacks returning string literals may need an explicit return annotation
+(or `as const`) to preserve strict action checking:
+
+```ts
+async onHandlerError(failure): Promise<HandlerErrorAction> {
+  await recordFailure(failure); // Application code; honor failure.signal.
+  return 'continue';
+}
+```
+
 ### Startup readiness
 
-Since Jobs 0.1.1, `onReady?: () => void | Promise<void>` separates startup notification from the
+`onReady?: () => void | Promise<void>` separates startup notification from the
 promise representing the worker's lifetime. The callback runs once after schema compatibility is
 checked and before dispatch, maintenance, or the optional listener starts. It is awaited; do not
 wait for a job to complete inside the callback. A thrown/rejected callback error rejects the worker

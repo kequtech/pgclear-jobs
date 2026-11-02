@@ -1,5 +1,5 @@
 import type { Pool, TransactionOptions } from '@kequtech/pgclear';
-import { definitionFactory } from './definition.js';
+import { definitionFactory, workerFactory } from './definition.js';
 import type { JobDefinition } from './definition.js';
 import { JobRecords } from './records.js';
 import { runJobsWithIntegration } from './runner.js';
@@ -21,6 +21,7 @@ export interface JobsIntegration<Database, Tx> {
 
 export interface JobsApi<Database, Tx> {
   readonly defineJob: ReturnType<typeof definitionFactory<Tx>>;
+  readonly defineWorker: ReturnType<typeof workerFactory<Tx>>;
   jobs(scope: Database | Tx): JobRecords;
   runJobs(
     database: Database,
@@ -35,6 +36,7 @@ export function createJobsIntegration<Database, Tx>(
 ): JobsApi<Database, Tx> {
   return Object.freeze({
     defineJob: definitionFactory<Tx>(),
+    defineWorker: workerFactory<Tx>(),
     jobs: (scope: Database | Tx) => new JobRecords(integration.execute(scope)),
     runJobs: (
       database: Database,

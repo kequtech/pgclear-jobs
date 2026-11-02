@@ -1,6 +1,6 @@
 {
   "name": "@kequtech/pgclear-jobs",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Durable PostgreSQL jobs with typed definitions and explicit database scopes",
   "type": "module",
   "license": "ISC",
@@ -40,12 +40,14 @@
     "dist/**/*.d.ts",
     "docs/*.md",
     "todo.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "examples/*.ts",
+    "examples/README.md"
   ],
   "scripts": {
     "jobs:migrate": "npm run build && node dist/cli.js migrate",
     "build": "node scripts/build.mjs",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p examples/tsconfig.json",
     "test:compile": "node scripts/build.mjs --test",
     "test:unit": "npm run build && npm run test:compile && node --test .test-dist/test/*.test.js",
     "test:integration": "npm run test:compile && node --env-file-if-exists=.env --test --test-concurrency=1 .test-dist/test/integration/*.test.js",
@@ -54,7 +56,9 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "check": "npm run format:check && npm run typecheck && npm test",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "example:worker": "npm run build && node --env-file-if-exists=.env examples/worker.ts",
+    "example:produce": "npm run build && node --env-file-if-exists=.env examples/produce.ts"
   },
   "dependencies": {
     "cron-parser": "^5.10.3"

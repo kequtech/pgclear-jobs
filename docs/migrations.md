@@ -31,7 +31,6 @@ intermediate versions or automatic destructive upgrades. Configuration changes n
 Programmatic equivalents are `migrateJobs(pool)` and `migrateJobs(pool, 'down')` from the root module.
 `installJobs(pool)` is also a convenience for installation. Each operation uses one transaction.
 Existing incompatible/unversioned namespaces are rejected by up; down can remove them intentionally.
-The old `tenon_jobs` prototype namespace is left alone.
 
 ## Application migration files
 

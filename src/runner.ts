@@ -3,6 +3,7 @@ import { listen } from '@kequtech/pgclear';
 import type { ConnectionOptions, Listener, Pool } from '@kequtech/pgclear';
 import { integer, validateOptions } from './validation.js';
 import { errorText } from './errors.js';
+import { definitionFactory } from './definition.js';
 import type { JobDefinition } from './definition.js';
 import { claimJob, recoverClaims } from './claims.js';
 import { checkSchema, notificationChannel } from './schema.js';
@@ -13,8 +14,10 @@ import { pruneCompleted } from './retention.js';
 import type { JobsIntegration } from './integration.js';
 import { pgclearIntegration } from './pgclear.js';
 import { executeAttempt } from './attempt.js';
+import { attemptInfo, eventObserver } from './observation.js';
+import type { AttemptInfo, RunnerHooks } from './observation.js';
 
-export interface RunnerOptions {
+export interface RunnerOptions extends RunnerHooks {
   readonly signal?: AbortSignal;
   /** Called once after storage validation, before dispatch. Awaited; rejection fails startup. */
   readonly onReady?: () => void | Promise<void>;
@@ -62,6 +65,8 @@ export async function runJobsWithIntegration<Database, Tx>(
   validateOptions(options, [
     'signal',
     'onReady',
+    'onEvent',
+    'onHandlerError',
     'concurrency',
     'notifications',
     'pollIntervalMs',
@@ -74,6 +79,19 @@ export async function runJobsWithIntegration<Database, Tx>(
   const onReady = options.onReady;
   if (onReady !== undefined && typeof onReady !== 'function')
     throw new TypeError('onReady must be a function.');
+  for (const key of ['onEvent', 'onHandlerError'] as const) {
+    if (options[key] !== undefined && typeof options[key] !== 'function')
+      throw new TypeError(`${key} must be a function.`);
+  }
+  const validateDefinition = definitionFactory<Tx>();
+  const onHandlerError = options.onHandlerError;
+  // Reject producer specifications and malformed JavaScript definitions before pool access.
+  for (const definition of definitions) {
+    if (!definition || typeof definition.handler !== 'function')
+      throw new TypeError('Every worker definition requires a handler.');
+    validateDefinition(definition);
+  }
+  const emit = eventObserver(options.onEvent);
   const concurrency = integer(options.concurrency ?? 1, 'concurrency', 1, 1000);
   const notifications = options.notifications;
   if (
@@ -99,7 +117,13 @@ export async function runJobsWithIntegration<Database, Tx>(
     throw new TypeError('Supply at least one definition, with no duplicate names.');
   }
   if (options.signal?.aborted) return;
-  const pool = integration.pool(database);
+  let pool: Pool;
+  try {
+    pool = integration.pool(database);
+  } catch (error) {
+    emit({ type: 'runnerFailed', error });
+    throw error;
+  }
   if (!pool || typeof pool.queryClassic !== 'function' || typeof pool.transaction !== 'function')
     throw new TypeError('runJobs requires an application-owned pgclear pool.');
   const names = [...byName.keys()];
@@ -111,14 +135,16 @@ export async function runJobsWithIntegration<Database, Tx>(
   const active = new Set<Promise<void>>();
   const counts = new Map<string, number>();
   const failures: unknown[] = [];
+  let failedAttempt: AttemptInfo | undefined;
   let connected = false;
   let shutdownTimer: ReturnType<typeof setTimeout> | undefined;
   const shutdown = () => {
     stop.abort();
     if (shutdownTimer === undefined) shutdownTimer = setTimeout(() => abandon.abort(), shutdownMs);
   };
-  const fail = (error: unknown) => {
-    if (!failures.length) failures.push(error);
+  const fail = (error: unknown, attempt?: AttemptInfo) => {
+    if (!failures.length) failedAttempt = attempt;
+    if (!failures.includes(error)) failures.push(error);
     stop.abort();
     abandon.abort();
   };
@@ -207,8 +233,10 @@ export async function runJobsWithIntegration<Database, Tx>(
             abandon.signal,
             requestedAt,
             databaseMs,
+            emit,
+            onHandlerError,
           )
-            .catch(fail)
+            .catch((error: unknown) => fail(error, attemptInfo(claim)))
             .finally(() => {
               active.delete(task);
               counts.set(claim.name, counts.get(claim.name)! - 1);
@@ -232,5 +260,12 @@ export async function runJobsWithIntegration<Database, Tx>(
     options.signal?.removeEventListener('abort', shutdown);
     clearTimeout(shutdownTimer);
   }
-  if (failures.length) throw failures[0];
+  if (failures.length) {
+    const error =
+      failures.length === 1
+        ? failures[0]
+        : new AggregateError(failures, 'Worker and cleanup failed.');
+    emit({ type: 'runnerFailed', error, ...(failedAttempt ? { attempt: failedAttempt } : {}) });
+    throw error;
+  }
 }

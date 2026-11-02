@@ -1,5 +1,5 @@
 import { createPool } from '@kequtech/pgclear';
-import { defineJob, jobs, runJobs } from '../src/index.js';
+import { defineJob, defineWorker, jobs, runJobs } from '../src/index.js';
 
 // Compile-time consumer contract; never executed.
 async function types() {
@@ -89,3 +89,51 @@ async function types() {
   await runJobs(pool, [a], { notifications: 'postgresql://localhost/example' });
 }
 void types;
+
+async function separated() {
+  const pool = createPool({});
+  const spec = defineJob<{ id: string }>({ name: 'shared', retryDelayMs: 100 });
+  const worker = defineWorker(spec, {
+    transactional: true,
+    async handler(payload, { tx }) {
+      await tx.queryClassic('SELECT $1::text', [payload.id]);
+      await jobs(tx).send(spec, payload);
+    },
+  });
+  await jobs(pool).send(spec, { id: 'one' });
+  await jobs(pool).request(spec, { id: 'one' }, { key: 'one' });
+  await jobs(pool).sendMany(spec, [{ payload: { id: 'one' } }]);
+  // @ts-expect-error A producer contract preserves payload typing without a handler.
+  await jobs(pool).send(spec, { id: 1 });
+  // @ts-expect-error A worker cannot change the shared payload contract.
+  defineWorker(spec, { handler(payload: number) {} });
+  defineWorker(spec, {
+    // @ts-expect-error A worker cannot require extra fields absent from the producer contract.
+    handler(payload: { id: string; extra: string }) {
+      void payload.extra;
+    },
+  });
+  // @ts-expect-error A worker cannot override submission policy.
+  defineWorker(spec, { handler(payload) {}, maxAttempts: 1 });
+  // @ts-expect-error A producer contract cannot run without a bound handler.
+  await runJobs(pool, [spec]);
+  await runJobs(pool, [worker], {
+    onEvent(event) {
+      // @ts-expect-error Events do not carry job payload fields.
+      void event.payload;
+      if (event.type === 'attemptFailed') {
+        const retry: Date | null = event.retryAt;
+        void retry;
+      }
+    },
+    async onHandlerError(failure): Promise<import('../src/index.js').HandlerErrorAction> {
+      const original: unknown = failure.error;
+      void original;
+      await Promise.resolve();
+      return failure.transactional ? 'stop' : 'continue';
+    },
+  });
+  // @ts-expect-error The handler error policy must return a supported action.
+  await runJobs(pool, [worker], { onHandlerError: () => 'retry' });
+}
+void separated;

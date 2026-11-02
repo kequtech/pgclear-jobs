@@ -9,9 +9,8 @@ Tenon ORM implements its guarded query/transaction binding, `db.jobs`/`tx.jobs` 
 disabled-feature behavior, and application migration generation. Keep those integration checks in
 Tenon; Jobs retains native pgclear and custom-scope engine coverage.
 
-Jobs 0.1.1 adds the shared `onReady` startup callback for HTTP hosts. Validate it through Tenon's
-forwarded runner options using the selected package artifact. Continue supervising the lifetime
-promise after startup. See the [integration responsibilities](docs/implementation-plan.md).
+Validate forwarded runner options and native/ORM transaction types using the selected package
+artifact. See the [integration responsibilities](docs/implementation-plan.md).
 
 ## Application acceptance
 
@@ -29,12 +28,11 @@ promise after startup. See the [integration responsibilities](docs/implementatio
 - Any intentional schema reset must account for lost jobs/history; saved application migration files
   remain immutable. Validate the deployment's transport/failover behavior where applicable.
 
-Follow the application acceptance checks above as consuming workflows adopt Jobs. See [development and release](docs/development.md).
+Follow these checks as consuming workflows adopt Jobs. See [development and release](docs/development.md).
 
 ## Optional improvements when needed
 
 Continuous worker progress reporting and structured `JobStateError` reasons may help administration
-and stall diagnosis. Startup notification is available through `onReady`; ongoing health reporting
-remains a separate capability to shape around concrete needs. Larger queue
-features, alternate database backends, stored business results, and a plugin framework are outside
-current needs.
+and stall diagnosis. Existing hooks cover startup, local attempts, and handler-error decisions;
+ongoing health reporting remains a separate capability to shape around concrete needs. Larger queue
+features, alternate database backends, stored business results, and a plugin framework are outside current needs.

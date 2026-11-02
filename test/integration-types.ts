@@ -21,6 +21,19 @@ async function types(database: Database) {
         options,
       ),
   });
+  const shared = defineJob<{ id: string }>({ name: 'shared' });
+  const bound = api.defineWorker(shared, {
+    transactional: true,
+    async handler(payload, { tx }) {
+      await tx.execute('SELECT $1::text', [payload.id]);
+      // @ts-expect-error Bound ORM workers do not receive the native driver transaction.
+      await tx.queryClassic('SELECT 1');
+    },
+  });
+  await api.jobs(database).send(shared, { id: 'one' });
+  await api.runJobs(database, [bound]);
+  // @ts-expect-error Native runners cannot invoke integrated worker scopes.
+  await runJobs(database.pool, [bound]);
   const custom = api.defineJob({
     name: 'custom',
     transactional: true,

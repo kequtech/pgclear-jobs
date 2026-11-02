@@ -82,3 +82,28 @@ test('an integration is inert and a pre-aborted runner does not resolve its pool
     TypeError,
   );
 });
+
+test('handlerless or malformed worker registrations and hooks fail before pool access', async () => {
+  const unexpected = (): never => {
+    throw new Error('pool access was not expected');
+  };
+  const api = createJobsIntegration<object, object>({
+    pool: unexpected,
+    execute: unexpected,
+    transaction: async () => unexpected(),
+  });
+  const spec = api.defineJob<number>({ name: 'producer-only' });
+  // @ts-expect-error Producers are not executable worker registrations.
+  await assert.rejects(api.runJobs({}, [spec]), TypeError);
+  const worker = api.defineWorker(spec, { handler(_payload) {} });
+  for (const options of [{ onEvent: true }, { onHandlerError: false }]) {
+    await assert.rejects(api.runJobs({}, [worker], options as never), TypeError);
+  }
+  for (const definition of [
+    { ...worker, transactional: 'yes' },
+    { ...worker, concurrency: 0 },
+    { ...worker, name: '\0' },
+  ]) {
+    await assert.rejects(api.runJobs({}, [definition] as never), TypeError);
+  }
+});

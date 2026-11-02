@@ -4,7 +4,7 @@ import type { TestContext } from 'node:test';
 import { createPool, DatabaseError, DriverError } from '@kequtech/pgclear';
 import type { Pool, Transaction, TransactionOptions } from '@kequtech/pgclear';
 import { defineJob, jobs, JobError, runJobs } from '../../src/index.js';
-import type { HandlerContext, JobDefinition, JobRecords } from '../../src/index.js';
+import type { HandlerContext, JobDefinition, JobRecords, RunnerEvent } from '../../src/index.js';
 import type { RunnerOptions } from '../../src/index.js';
 import { createJobsIntegration } from '../../src/integration.js';
 import { claimJob, finishClaim, recoverClaims } from '../../src/claims.js';
@@ -482,7 +482,17 @@ for (const [commitDelivered, abortBeforeResponse] of [
       });
       const job = await jobs(pool).send(def, 1);
       const stop = new AbortController();
-      const outcome = runJobs(worker, [def], { signal: stop.signal, shutdownTimeoutMs: 0 }).then(
+      const events: RunnerEvent[] = [];
+      const outcome = runJobs(worker, [def], {
+        signal: stop.signal,
+        shutdownTimeoutMs: 0,
+        onEvent(event) {
+          events.push(event);
+        },
+        onHandlerError() {
+          throw new Error('Managed commit uncertainty must not enter the handler policy');
+        },
+      }).then(
         () => null,
         (error: unknown) => error,
       );
@@ -498,6 +508,11 @@ for (const [commitDelivered, abortBeforeResponse] of [
         const error = await outcome;
         assert.ok(error instanceof DriverError);
         assert.equal(error.code, 'PGCLEAR_COMMIT_UNKNOWN');
+        assert.deepEqual(
+          events.map((e) => e.type),
+          ['attemptStarted', 'runnerFailed'],
+        );
+        assert.equal(events.find((e) => e.type === 'runnerFailed')!.error, error);
         assert.equal(calls, 1);
         assert.equal(
           (await pool.queryClassic(`SELECT * FROM ${app}`)).rows.length,
@@ -532,11 +547,13 @@ for (const adapter of ['pgclear', 'integration'] as const) {
       const client = createPool({ ...proxy.connection, maxConnections: 1 });
       let handlerSignal: AbortSignal | undefined;
       let calls = 0;
+      const original = new JobError('permanent failure', { retry: false });
+      const events: RunnerEvent[] = [];
       const def = transactional(adapter, async (_value, { query, signal }) => {
         handlerSignal = signal;
         calls++;
         await query(`INSERT INTO ${app} VALUES (1)`);
-        throw new JobError('permanent failure', { retry: false });
+        throw original;
       });
       const worker = new Proxy(pool, {
         get(target, key) {
@@ -559,6 +576,12 @@ for (const adapter of ['pgclear', 'integration'] as const) {
       const outcome = runners.get(def.name)!(worker, {
         signal: stop.signal,
         shutdownTimeoutMs: 0,
+        onEvent(event) {
+          events.push(event);
+        },
+        onHandlerError() {
+          throw new Error('Unconfirmed rollback must not enter the handler policy');
+        },
       }).then(
         () => null,
         (error: unknown) => error,
@@ -573,6 +596,12 @@ for (const adapter of ['pgclear', 'integration'] as const) {
         assert.ok(error instanceof AggregateError, 'a failed rollback must reach supervision');
         assert.ok(error.errors.some((cause: unknown) => cause instanceof DriverError));
         assert.match(String(error.errors[0]?.cause), /permanent failure/);
+        assert.equal(error.errors[0]?.cause, original);
+        assert.deepEqual(
+          events.map((e) => e.type),
+          ['attemptStarted', 'runnerFailed'],
+        );
+        assert.equal(events.find((e) => e.type === 'runnerFailed')!.error, error);
         assert.equal(calls, 1);
         assert.equal((await pool.queryClassic(`SELECT * FROM ${app}`)).rows.length, 0);
         assert.equal((await jobs(pool).get(job.id))?.state, 'running');

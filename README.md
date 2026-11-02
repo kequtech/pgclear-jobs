@@ -62,10 +62,41 @@ by default. Observe its promise: runner infrastructure and managed-transaction f
 for application supervision.
 The runner leaves the application pool open.
 
-HTTP hosts can use `onReady` to observe startup separately from the worker's lifetime promise.
-It runs once after storage validation and is awaited before dispatch. Continue supervising the
-worker promise for later failures; readiness does not report ongoing health or listener availability.
+HTTP hosts can use `onReady` to observe startup separately from the supervised worker lifetime.
 See [startup readiness](docs/api.md#startup-readiness).
+
+## Share a producer contract and bind workers separately
+
+A producer only needs the name, payload type, and submission policy:
+
+```ts
+// jobs.ts — shared with producers; imports no handler implementation.
+export const refresh = defineJob<{ projectId: string }>({
+  name: 'refresh-project',
+  maxAttempts: 4,
+});
+
+await jobs(pool).send(refresh, { projectId });
+```
+
+Bind the handler in the worker process:
+
+```ts
+import { defineWorker } from '@kequtech/pgclear-jobs';
+
+const worker = defineWorker(refresh, {
+  transactional: true,
+  async handler(payload, { tx }) {
+    await tx.queryClassic('UPDATE projects SET ready = true WHERE id = $1', [payload.projectId]);
+  },
+});
+await runJobs(pool, [worker], { signal });
+```
+
+`defineWorker` preserves the shared submission policy and payload type. It adds only handler,
+transactional mode, and local concurrency. Inline `defineJob({ handler })` remains supported.
+A handler-free contract cannot be registered with a runner. See the
+[runnable producer/worker example](examples/README.md).
 
 ## Submit events or request current state
 
@@ -145,6 +176,9 @@ retention. Completed/cancelled history is retained for seven days by default; fa
 explicit cleanup. Cleanup also releases stable-ID deduplication. Pass cancellation signals through
 your dependencies: JavaScript that ignores cancellation can continue after its claim is lost.
 
+Use `onEvent` for local observations and `onHandlerError` for explicit continue/stop decisions.
+See [observation and error policy](docs/api.md#observation-and-error-policy).
+
 ## Documentation
 
 - [API reference](docs/api.md): definitions, records, schedules, errors, and runner options.
@@ -154,4 +188,4 @@ your dependencies: JavaScript that ignores cancellation can continue after its c
 - [Architecture](docs/architecture.md) and [development](docs/development.md).
 
 The package has no ORM dependency. Tenon ORM exposes its thin `db.jobs`/`tx.jobs` facade over this
-engine. See the [integration contract](docs/integration.md) and [integration responsibilities](docs/implementation-plan.md).
+engine. See the [integration contract](docs/integration.md).

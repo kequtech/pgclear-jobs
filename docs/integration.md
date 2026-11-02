@@ -54,12 +54,14 @@ Preserve driver/aggregate errors, including uncertain commits and cleanup failur
 The factory returns:
 
 - `defineJob`: definitions whose transactional handlers receive the supplied `Tx` type.
+- `defineWorker`: worker-only handler binding using the same `Tx` type and a shared `JobSpec`.
 - `jobs(scope)`: the ordinary record facade using that scope's executor.
 - `runJobs(database, definitions, options?)`: the same worker engine with integrated transactions.
 
 `JobDefinition<Payload, Tx>` and `TransactionalHandlerContext<Tx>` are available from the root module.
-Record operations accept native or integrated definitions while preserving payload types because
-they only need metadata. Runners must match the transaction type expected by transactional handlers.
+Record operations accept handler-free specifications and native/integrated definitions while
+preserving payload types because they only need metadata. Runners must match the transaction type
+expected by transactional handlers.
 
 Successful completion runs through the transaction executor after the handler returns. Its SQL
 budget is enforced through the transaction's abort signal, so the integration needs no separate
@@ -68,15 +70,16 @@ Unsettled JavaScript retains its local slot until it settles or shutdown spends 
 
 ## Lifecycle
 
-Forward `runJobs` options and its promise directly. pgclear-jobs owns startup, dispatch, heartbeats,
-maintenance, notifications, graceful shutdown, handler cancellation, and driver cleanup. Startup and
-operational failures reject that promise. The engine leaves the shared pool open.
+Forward `runJobs` options and its promise directly, including `onReady`, `onEvent`, and `onHandlerError`.
+pgclear-jobs owns startup, dispatch, heartbeats, maintenance, notifications, graceful shutdown, handler
+cancellation, and driver cleanup. Startup and operational failures reject that promise. The engine
+leaves the shared pool open.
 
-Forward `onReady` unchanged with the other runner options. Jobs 0.1.1 invokes it once after schema
-validation and awaits it before starting dispatch, maintenance, or notifications. This is a startup
-notification, separate from the worker lifetime and ongoing health. Callback failure rejects startup
-with its original error; abort interrupts a pending callback and observes late rejection. Integrations
-need no readiness probe, timer, listener check, or additional lifecycle promise.
+Integrations need no readiness probe, timer, listener check, or additional lifecycle promise.
+See [startup readiness](api.md#startup-readiness) and
+[observation and error policy](api.md#observation-and-error-policy) for the engine's callback contract.
+Forward shared types and options; do not duplicate event dispatch, error classification, retry
+timestamps, or cancellation logic.
 
 A query library may check its own enablement/open state before forwarding. The application connects
 its process signals and supervision, requests shutdown, awaits the worker, then closes the database.
@@ -88,8 +91,10 @@ Tenon ORM implements `defineJob`, `db.jobs`, transactional `tx.jobs`, disabled-f
 transaction-options forwarding, and application migration generation. Its binding supplies the
 existing pool and guarded ORM scopes to this engine. This package contains no Tenon dependency.
 
-With Jobs 0.1.1 installed, `db.jobs.run(definitions, { signal, onReady })` forwards the startup callback
-through the shared `RunnerOptions` type. Use one compatible pgclear package instance across the
-application, Tenon, and Jobs; when testing local tarballs, ensure transitive dependencies select the
-same artifacts as direct dependencies. See the [integration responsibilities](implementation-plan.md)
-for ownership and acceptance checks.
+`db.jobs.run(definitions, options)` forwards the shared `RunnerOptions` type. Use one compatible
+pgclear package instance across the application, Tenon, and Jobs. See the
+[integration responsibilities](implementation-plan.md) for ownership and acceptance checks.
+
+Re-export handler-free `defineJob` contracts and bind the factory's `defineWorker` once for the ORM
+transaction type. Producers submit through their ordinary scoped record facade. Only worker modules
+import application handlers. Keep the inline definition API available for small applications.

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { defineJob } from '../src/index.js';
+import { defineJob, defineWorker } from '../src/index.js';
 import { serializePayload } from '../src/validation.js';
 
 test('definitions are inert, immutable and preserve the handler', () => {
@@ -76,4 +76,25 @@ test('misspelled definition options fail before silently changing execution poli
   for (const options of [{ maxAttempt: 1 }, { executionTimoutMs: 1000 }, { transaction: true }]) {
     assert.throws(() => defineJob({ name: 'example', handler() {}, ...options }), TypeError);
   }
+});
+
+test('producer specifications are inert and bind a worker without changing submission policy', () => {
+  const spec = defineJob<{ id: string }>({ name: 'separated', maxAttempts: 7 });
+  assert.equal(Object.isFrozen(spec), true);
+  assert.equal('handler' in spec, false);
+  const worker = defineWorker(spec, {
+    concurrency: 2,
+    handler(payload) {
+      void payload.id;
+    },
+  });
+  assert.equal(Object.isFrozen(worker), true);
+  assert.equal(worker.name, spec.name);
+  assert.equal(worker.maxAttempts, 7);
+  assert.equal(worker.concurrency, 2);
+  assert.equal('concurrency' in spec, false);
+  assert.throws(() => defineWorker(spec, { handler: undefined } as never), TypeError);
+  assert.throws(() => defineWorker(spec, {} as never), TypeError);
+  assert.throws(() => defineWorker(spec, { handler() {}, maxAttempts: 1 } as never), TypeError);
+  assert.throws(() => defineJob({ name: 'invalid', concurrency: 1 } as never), TypeError);
 });

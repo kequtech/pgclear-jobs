@@ -1,5 +1,8 @@
-export { defineJob } from './definition.js';
+export { defineJob, defineWorker } from './definition.js';
 export type {
+  JobSpec,
+  JobSpecOptions,
+  WorkerOptions,
   ExecutionPolicy,
   HandlerContext,
   TransactionalHandlerContext,
@@ -27,3 +30,12 @@ export { runJobs } from './runner.js';
 export type { RunnerOptions } from './runner.js';
 export { previewSchedule } from './schedules.js';
 export type { Schedule, ScheduleOptions } from './schedules.js';
+
+export type {
+  AttemptInfo,
+  HandlerFailure,
+  HandlerErrorAction,
+  AttemptAbandonReason,
+  RunnerEvent,
+  RunnerHooks,
+} from './observation.js';

@@ -1,6 +1,16 @@
 # Changelog
 
-## 0.1.1 — Unreleased
+## 0.2.0 — Unreleased
+
+- Separate handler-free producer contracts from worker bindings with `JobSpec` and `defineWorker`;
+  preserve inline definitions and infer native/integrated transaction scopes.
+- Add isolated local `onEvent` observations and explicit `onHandlerError` continue/stop decisions
+  after managed rollback. Preserve original errors, committed retry timestamps, cancellation, and
+  concurrent cleanup failures; unknown commits never report successful completion.
+- Add native runnable producer/worker examples and installed-package/type/reliability coverage.
+- Keep schema SQL unchanged; this release needs no Jobs schema migration.
+
+## 0.1.1
 
 - Add optional, awaited `onReady` notification after storage validation and before worker dispatch.
   Startup callback failures preserve their original errors; shutdown interrupts pending callbacks

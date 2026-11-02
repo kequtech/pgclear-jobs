@@ -58,8 +58,8 @@ Only operations on that supplied scope participate. Other pools and external cal
 Retain idempotency for effects outside the transaction and for distinct submissions of the same
 business operation. Await every transaction operation and do not retain the scope after use.
 
-Exceptions escaping a handler become ordinary attempt failures under saved retry policy. This
-includes a driver error from a transaction the application opens independently inside the handler.
+By default, exceptions escaping a handler become ordinary attempt failures under saved retry policy.
+This includes a driver error from a transaction the application opens independently inside the handler.
 The driver does not replay transactions, but a retry of the whole handler can repeat that application
 logic. Failures opening, committing, or cleaning up the Jobs-managed transaction outside handler
 invocation instead reach worker supervision. A driver error's class alone does not select that path.
@@ -173,3 +173,8 @@ responses. Synthetic load profiles exercise backlogs alongside application traff
 Those checks do not establish deployment capacity or validate every application effect, TLS topology,
 database failover, or long-term production behavior. Validate the target application's idempotency,
 cancellation, supervision, and rollout. See [development](development.md) for reproduction commands.
+
+Completion/failure events require acknowledged database outcomes and do not replace durable
+job/application state.
+Handler-error decisions follow confirmed managed rollback; uncertain transaction outcomes still
+reach supervision. See [observation and error policy](api.md#observation-and-error-policy).

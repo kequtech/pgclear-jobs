@@ -1,7 +1,8 @@
 # Architecture
 
 pgclear-jobs has three main concepts: a typed definition, a persisted job, and an explicit runner.
-Definitions are inert. Record methods use the database scope supplied by the caller. Runners execute
+Producer specifications and definitions are inert. A worker binds executable code to a shared
+specification. Record methods use the database scope supplied by the caller. Runners execute
 committed work and own their worker lifecycle.
 
 ## Boundaries
@@ -32,10 +33,10 @@ transaction for its application writes and fenced successful completion. Handler
 before failure/retry bookkeeping. Managed-transaction commit and cleanup failures propagate to supervision;
 exceptions from independently opened application transactions remain handler failures under retry policy.
 
-Handler settlement and transaction settlement are tracked separately. A cancelled driver scope can
-roll back while uncooperative JavaScript continues; that JavaScript retains its local slot. Attempt
-execution keeps those rules together in one module. The runner handles dispatch, maintenance,
-notifications, and worker shutdown around it.
+Handler settlement and transaction settlement are tracked separately: a cancelled driver scope can
+roll back while uncooperative JavaScript continues and retains its local slot. `attempt.ts` owns
+execution and [hook semantics](api.md#observation-and-error-policy); the runner owns dispatch,
+maintenance, notifications, and shutdown.
 
 A terminal trigger promotes keyed successors atomically. A request function handles head/successor
 contention within the caller's SQL scope. Recurring schedules submit ordinary jobs in bounded
@@ -48,6 +49,7 @@ transactions. Automatic cleanup uses a completed/cancelled-only index and bounde
 | `definition.ts`, `validation.ts`                        | Typed definitions, execution policy, input validation                                 |
 | `records.ts`, `storage.ts`                              | Public record operations, mapping, precise pagination cursors                         |
 | `claims.ts`                                             | Atomic claims, renewals, outcomes, expired-claim recovery                             |
+| `observation.ts`                                        | Local event isolation and typed handler-error policy                                  |
 | `attempt.ts`                                            | One handler attempt: lease/deadline monitoring, transaction, completion, cancellation |
 | `runner.ts`, `wakeup.ts`                                | Dispatch, maintenance, notification lifecycle, abortable waits                        |
 | `schedules.ts`, `retention.ts`                          | Recurring production and automatic history cleanup                                    |

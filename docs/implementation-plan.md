@@ -17,9 +17,6 @@ Tenon depends directly on pgclear and pgclear-jobs, with compatible driver range
 required Jobs peer. Ordinary ORM use with Jobs disabled must create no Jobs storage, workers, or
 listeners. Importing libraries and defining jobs remain inert.
 
-The package/repository/source is pgclear-jobs; storage is `pgclear_jobs`. Existing configured
-connections are preserved. The old `tenon_jobs` development namespace is not migrated automatically.
-
 ## Integration responsibilities
 
 1. **Forward transaction options.** `db.transaction(callback, options?)` and its internal
@@ -29,9 +26,11 @@ connections are preserved. The old `tenon_jobs` development namespace is not mig
    the existing root pool, SQL through the exact ORM query scope, and real ORM transactions.
    Preserve affected-row savepoints, serialized guarded operations, query observation, and scope
    expiry. Do not construct pools or ORM instances per handler or bypass guards via a raw transaction.
-3. **Expose the facade.** Tenon re-exports the ORM-typed `defineJob`, Jobs errors, and relevant types. It exposes
-   `db.jobs` for record/worker operations and restricted `tx.jobs` for transactional record operations.
-   Transaction scopes cannot start workers or install storage.
+3. **Expose the facade.** Tenon re-exports the ORM-typed `defineJob` and `defineWorker`, Jobs errors,
+   and relevant types. Shared handler-free contracts belong in producer modules; worker modules bind
+   handlers with the ORM transaction type. Tenon exposes `db.jobs` for record/worker operations and
+   restricted `tx.jobs` for transactional record operations. Transaction scopes cannot start workers
+   or install storage.
 4. **Enable explicitly.** `jobs?: boolean` defaults to false. Keep stable facade types; disabled
    operations reject before SQL/acquisition and leave an existing transaction usable. Enabling Jobs
    enables its operations without creating tables or starting workers.
@@ -42,52 +41,15 @@ connections are preserved. The old `tenon_jobs` development namespace is not mig
    selected published version. Do not commit machine-specific `file:` dependencies.
    An ordinary release/publication and a production pilot remain separate decisions.
 
-Worker startup readiness belongs to pgclear-jobs: Jobs 0.1.1 adds `onReady` to the shared runner
-options. Tenon forwards it unchanged and consumes a Jobs version that provides it. Fix any newly
-demonstrated ownership bug in the package that owns it.
-
-## Application API
-
-```ts
-import { createTenon, defineJob } from '@kequtech/tenon-orm';
-
-const db = createTenon({ connection: databaseUrl, jobs: true });
-const refreshProject = defineJob({
-  name: 'refresh-project',
-  transactional: true,
-  async handler(payload: { projectId: string }, { tx }) {
-    await updateProject(tx, payload.projectId);
-  },
-});
-
-await db.transaction(async (tx) => {
-  await saveProject(tx, project);
-  await tx.jobs.send(refreshProject, { projectId: project.id });
-});
-```
-
-The application functions in this example use the supplied ORM transaction. Application code needs
-no separate Jobs imports or per-handler adapters.
-
 ## Worker lifecycle
 
 `db.jobs.run(definitions, options)` checks enablement/open state and forwards the integration's
 `runJobs`, its options, and its result. Jobs owns dispatch, maintenance, notifications, graceful
 shutdown, cancellation, and cleanup. Tenon adds no dispatcher, worker registry, drain loop, shutdown
 timer, readiness probe, or retry/error translation. Multiple runs remain independently controlled.
-`onReady` runs after storage validation and before background work; continue observing the lifetime
-promise for later failure. Its semantics come directly from Jobs.
-
-```ts
-const stop = new AbortController();
-process.once('SIGTERM', () => stop.abort());
-process.once('SIGINT', () => stop.abort());
-try {
-  await db.jobs.run([refreshProject], { signal: stop.signal });
-} finally {
-  await db.close();
-}
-```
+Forward shared callback options and types unchanged. Their contracts live in the API reference:
+[startup readiness](api.md#startup-readiness) and
+[observation and error policy](api.md#observation-and-error-policy).
 
 An HTTP app observes the same worker promise through its existing supervision, requests shutdown,
 and awaits it before closing the database. `db.close()` keeps its database-resource responsibility.
@@ -114,6 +76,9 @@ down. Stop producers/workers before removal and retain saved app migration files
   savepoint recovery, concurrent guarded query ordering, return modes, and `onQuery` observation.
 - Through `db.jobs.run`, check inert pre-aborted startup, graceful completion, grace expiry, and
   propagation of startup/database/cleanup failures. Jobs leaves the pool usable until its owner closes it.
+- Producer contracts preserve payload types, worker bindings supply the ORM transaction scope, and
+  handler-error decisions see original errors after rollback. Uncertain commits must not emit false
+  outcome events or enter the ordinary handler-error policy.
 - Disabled Jobs operations fail before SQL and do not poison an app transaction. Ordinary queries
   require no Jobs storage. Missing/incompatible storage gives a useful worker-start failure.
 - Generated up/down files pass Tenon's SQL scanner and migration runner, work beside existing app

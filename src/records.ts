@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Executor, InputValue } from '@kequtech/pgclear';
 import { databaseText, integer, serializePayload, uuid, validateOptions } from './validation.js';
 import { executionPolicy } from './definition.js';
-import type { JobDefinition } from './definition.js';
+import type { JobSpec } from './definition.js';
 import { JobNotFoundError, JobStateError } from './errors.js';
 import { jobRecord, readCursor, states } from './storage.js';
 import type { Execute, Job, JobState, StoredJob } from './storage.js';
@@ -78,7 +78,7 @@ export class JobRecords {
   constructor(private readonly execute: Execute) {}
 
   schedule<Payload>(
-    definition: JobDefinition<Payload, never>,
+    definition: JobSpec<Payload>,
     payload: NoInfer<Payload>,
     options: ScheduleOptions,
   ): Promise<Schedule<Payload>> {
@@ -86,13 +86,13 @@ export class JobRecords {
   }
 
   schedules<Payload>(
-    definition: JobDefinition<Payload, never>,
+    definition: JobSpec<Payload>,
     options: { readonly limit?: number } = {},
   ): Promise<readonly Schedule<Payload>[]> {
     return listSchedules(this.execute, definition, options.limit ?? 100);
   }
 
-  async unschedule(definition: JobDefinition<unknown, never>, key = ''): Promise<boolean> {
+  async unschedule(definition: JobSpec<unknown>, key = ''): Promise<boolean> {
     return (
       (
         await this.execute<{ id: string }>(
@@ -104,7 +104,7 @@ export class JobRecords {
   }
 
   async send<Payload>(
-    definition: JobDefinition<Payload, never>,
+    definition: JobSpec<Payload>,
     payload: NoInfer<Payload>,
     options: SendOptions = {},
   ): Promise<Job<Payload>> {
@@ -130,7 +130,7 @@ export class JobRecords {
 
   /** Coalesce unstarted work, or retain one follow-up behind a job and all its retries. */
   async request<Payload>(
-    definition: JobDefinition<Payload, never>,
+    definition: JobSpec<Payload>,
     payload: NoInfer<Payload>,
     options: RequestOptions,
   ): Promise<Job<Payload>> {
@@ -155,7 +155,7 @@ export class JobRecords {
   }
 
   async sendMany<Payload>(
-    definition: JobDefinition<Payload, never>,
+    definition: JobSpec<Payload>,
     inputs: readonly Submission<NoInfer<Payload>>[],
   ): Promise<readonly Job<Payload>[]> {
     integer(inputs.length, 'batch size', 0, 1000);
@@ -184,7 +184,7 @@ export class JobRecords {
   }
 
   async find<Payload>(
-    definition: JobDefinition<Payload, never>,
+    definition: JobSpec<Payload>,
     options: FindOptions = {},
   ): Promise<readonly Job<Payload>[]> {
     if (options.states?.some((state) => !states.includes(state)))
@@ -213,7 +213,7 @@ export class JobRecords {
   }
 
   async update<Payload>(
-    definition: JobDefinition<Payload, never>,
+    definition: JobSpec<Payload>,
     id: string,
     payload: NoInfer<Payload>,
   ): Promise<Job<Payload>> {
@@ -259,7 +259,7 @@ export class JobRecords {
     return false;
   }
 
-  async prune(definition: JobDefinition<unknown, never>, options: PruneOptions): Promise<number> {
+  async prune(definition: JobSpec<unknown>, options: PruneOptions): Promise<number> {
     const selected = options.states ?? ['completed', 'cancelled'];
     if (selected.some((state) => !['completed', 'failed', 'cancelled'].includes(state)))
       throw new TypeError('Only terminal job states can be pruned.');
@@ -280,7 +280,7 @@ export class JobRecords {
     return rows.length;
   }
 
-  async stats(definition: JobDefinition<unknown, never>): Promise<JobStats> {
+  async stats(definition: JobSpec<unknown>): Promise<JobStats> {
     const { rows } = await this.execute<{
       state: JobState;
       count: number;

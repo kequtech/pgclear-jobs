@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -53,10 +53,13 @@ test('packed core, migration SQL and integration types work with the required pg
     await writeFile(
       join(directory, 'consumer.mjs'),
       `
-      import { defineJob, jobs, runJobs, installJobs } from '@kequtech/pgclear-jobs';
+      import { defineJob, defineWorker, jobs, runJobs, installJobs } from '@kequtech/pgclear-jobs';
       import { jobsMigration } from '@kequtech/pgclear-jobs/migrations';
       import { createJobsIntegration } from '@kequtech/pgclear-jobs/integration';
       import { createPool } from '@kequtech/pgclear';
+      const spec = defineJob({ name: 'producer' });
+      const bound = defineWorker(spec, { handler(payload) {} });
+      if ('handler' in spec || typeof bound.handler !== 'function') throw new Error('Producer and worker were not separated');
       const definition = defineJob({ name: 'consumer', handler(payload) {} });
       const pool = createPool({});
       if (!definition.name || typeof jobs(pool).send !== 'function' ||
@@ -70,6 +73,19 @@ test('packed core, migration SQL and integration types work with the required pg
     `,
     );
     execFileSync(process.execPath, [join(directory, 'consumer.mjs')], { stdio: 'pipe' });
+    const examples = join(directory, 'jobs-example');
+    await cp(join(directory, 'node_modules/@kequtech/pgclear-jobs/examples'), examples, {
+      recursive: true,
+    });
+    for (const script of ['produce.ts', 'worker.ts']) {
+      const loaded = spawnSync(process.execPath, [join(examples, script)], {
+        cwd: directory,
+        env: { ...process.env, DATABASE_URL: '' },
+        encoding: 'utf8',
+      });
+      assert.equal(loaded.status, 1);
+      assert.match(loaded.stderr, /DATABASE_URL is required/);
+    }
     const manifest = JSON.parse(
       await readFile(join(directory, 'node_modules/@kequtech/pgclear-jobs/package.json'), 'utf8'),
     ) as { bin: Record<string, string> };
@@ -91,11 +107,27 @@ test('packed core, migration SQL and integration types work with the required pg
     await writeFile(
       join(directory, 'consumer.ts'),
       `
-      import { defineJob, jobs, runJobs } from '@kequtech/pgclear-jobs';
+      import { defineJob, defineWorker, jobs, runJobs } from '@kequtech/pgclear-jobs';
       import { createJobsIntegration } from '@kequtech/pgclear-jobs/integration';
       import type { Execute } from '@kequtech/pgclear-jobs/integration';
       import { createPool } from '@kequtech/pgclear';
       const pool = createPool({});
+      const spec = defineJob<{ id: string }>({ name: 'shared' });
+      const bound = defineWorker(spec, { transactional: true, async handler(payload, {tx}) {
+        await tx.queryClassic('SELECT $1::text', [payload.id]);
+      }});
+      await jobs(pool).send(spec, {id:'one'});
+      // @ts-expect-error Handler-free payload contracts remain strict in the package.
+      await jobs(pool).send(spec, {id:1});
+      // @ts-expect-error A worker cannot narrow its shared producer input.
+      defineWorker(spec, {handler(payload: {id: string; extra: string}) { void payload.extra; }});
+      // @ts-expect-error A producer cannot run until bound to a handler.
+      void runJobs(pool, [spec]);
+      void runJobs(pool, [bound], { onEvent(event) {
+        if (event.type === 'attemptFailed') { const retry: Date|null = event.retryAt; void retry; }
+      }, async onHandlerError(failure): Promise<import('@kequtech/pgclear-jobs').HandlerErrorAction> {
+        await Promise.resolve(); return failure.transactional ? 'stop' : 'continue';
+      }});
       const definition = defineJob({ name: 'typed', handler(payload: { id: string }) {} });
       const transactional = defineJob({
         name: 'transactional', transactional: true,
@@ -112,6 +144,9 @@ test('packed core, migration SQL and integration types work with the required pg
         execute: scope => scope.execute,
         transaction: (db, work, options) => db.pool.transaction(tx => work({execute: (text, values) => tx.queryClassic(text, values)}), options),
       });
+      const integratedWorker = api.defineWorker(spec, {transactional:true, async handler(payload, {tx}) { await tx.execute('SELECT $1::text',[payload.id]); }});
+      // @ts-expect-error A native runner cannot invoke an integrated worker.
+      void runJobs(pool, [integratedWorker]);
       const custom = api.defineJob({name: 'custom', transactional: true, async handler(payload: {id: string}, {tx}) {
         await tx.execute('SELECT $1::text', [payload.id]);
       }});

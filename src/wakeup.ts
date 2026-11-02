@@ -39,7 +39,10 @@ export async function settleOrAbort<T>(
   work: Promise<T>,
   signal: AbortSignal,
 ): Promise<T | undefined> {
-  if (signal.aborted) return;
+  if (signal.aborted) {
+    void work.catch(() => {});
+    return;
+  }
   let onAbort: () => void = () => {};
   const aborted = new Promise<undefined>((resolve) => {
     onAbort = () => resolve(undefined);

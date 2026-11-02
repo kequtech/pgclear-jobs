@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import test from 'node:test';
 import { createPool, DriverError } from '@kequtech/pgclear';
 import { jobs, runJobs } from '../../src/index.js';
+import type { RunnerEvent } from '../../src/index.js';
 import { claimJob, finishClaim, recoverClaims } from '../../src/claims.js';
 import type { Claim } from '../../src/claims.js';
 import { connectionProxy } from '../helpers/connection-proxy.js';
@@ -329,6 +330,7 @@ test(
     const client = createPool({ ...proxy.connection, maxConnections: 1 });
     const finish = Promise.withResolvers<void>();
     const handled: number[] = [];
+    const events: RunnerEvent[] = [];
     const def = definition({
       handler: async (value) => {
         handled.push(value);
@@ -342,6 +344,9 @@ test(
         pollIntervalMs: 10,
         recoveryIntervalMs: 30_000,
         databaseTimeoutMs: 5000,
+        onEvent(event) {
+          events.push(event);
+        },
       }),
     );
     try {
@@ -354,6 +359,11 @@ test(
       const error = await outcome;
       assert.ok(error instanceof DriverError);
       assert.equal(error.outcome, 'unknown');
+      assert.deepEqual(
+        events.map((e) => e.type),
+        ['attemptStarted', 'runnerFailed'],
+      );
+      assert.equal(events.find((e) => e.type === 'runnerFailed')!.error, error);
       assert.equal((await jobs(pool).attempts(job.id)).length, 1);
       const stop = new AbortController();
       const marker = await jobs(pool).send(def, 2);
