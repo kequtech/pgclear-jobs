@@ -177,6 +177,7 @@ use pgclear's outcome evidence when choosing reconciliation/escalation policy.
 `migrateJobs(pool,'down')` intentionally removes it. The CLI reads DATABASE_URL/environment or .env:
 `pgclear-jobs migrate [up|down]`. Help needs no credentials. No worker/record facade performs DDL.
 
-`jobsMigration.up/down` from `/migrations` is fresh-install SQL. `jobsUpgrade` is {from:1,to:2,up,down}
-for the version-1-to-2 migration. jobsCancellationUpgrade is {from:2,to:3,up,down}. Caller supplies the transaction. Installation does
-not perform this upgrade. [Storage](storage.md) owns order, reversal restrictions and grants.
+`jobsMigration.up/down` from `/migrations` is the single canonical installation/removal pair for the
+current schema. The caller supplies the transaction. Applications author migrations for existing
+storage themselves; no version-specific upgrade SQL is exported. [Storage](storage.md) covers
+ownership, compatibility and grants.

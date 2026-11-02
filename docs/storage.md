@@ -26,47 +26,25 @@ These contain no outer BEGIN/COMMIT; the runner supplies the transaction. Commit
 make historical migrations import a live installer or the newest package. A query-library CLI may copy
 this pair into its migration directory; ownership of saved SQL remains with the application.
 
-## Upgrade storage
+## Change existing storage
 
-Jobs 0.3.0 requires storage version 3. Upgrades are concrete SQL, saved as new application migrations:
+Jobs 0.3.0 requires storage version 3. The package provides one canonical jobsMigration.up/down pair
+for the current schema. It does not provide version-specific upgrade or downgrade SQL.
 
-| Existing storage     | Export from @kequtech/pgclear-jobs/migrations | Result                                                |
-| -------------------- | --------------------------------------------- | ----------------------------------------------------- |
-| 1 (Jobs 0.2.0)       | jobsUpgrade                                   | 2: keyed schedules                                    |
-| 2 (Jobs 0.2.1/0.2.2) | jobsCancellationUpgrade                       | 3: durable cancellation and cancelled attempt history |
+When upgrading an application, compare its saved Jobs schema with the current canonical SQL and
+author the necessary changes as a new application migration. Preserve queued work and immutable
+migration history. Stop old producers/workers, apply the reviewed migration as the storage owner,
+verify grants and restart matching packages. Test it against representative retained jobs, attempts
+and schedules. Do not apply the fresh-install down/up pair to upgrade populated storage.
 
-For version 1, apply both pairs in order. Fresh installations use jobsMigration directly.
-An application script importing these exports must declare pgclear-jobs directly; a transitive
-installation through an ORM does not grant direct imports under strict package managers.
+Version 2 → 3 adds jobs.cancel_requested_at and permits cancelled attempt outcomes. Version 1 → 2
+added schedules.request_key. The canonical SQL defines their exact types and constraints. Choose
+reversal behavior deliberately: active cancellation intent and cancelled attempt history must not
+be silently erased when reverting to an older schema.
 
-Choose the next unused migration number and save the SQL. For version 2, for example:
-
-```ts
-import { writeFile } from 'node:fs/promises';
-import { jobsCancellationUpgrade } from '@kequtech/pgclear-jobs/migrations';
-
-await writeFile('migrations/0005_jobs_cancellation.up.sql', jobsCancellationUpgrade.up, {
-  flag: 'wx',
-});
-await writeFile('migrations/0005_jobs_cancellation.down.sql', jobsCancellationUpgrade.down, {
-  flag: 'wx',
-});
-```
-
-1. Stop producers and schedulers/workers using the old package; await normal cleanup.
-2. Review/commit the new pair. Apply up in a transaction as the storage owner through the existing
-   migration runner. The SQL checks its source version and takes the installation lock.
-3. Verify grants and restart matching producers/workers. Mixed storage/package versions reject.
-
-Neither setup, migrate up nor worker startup upgrades existing storage. A failed migration rolls
-back its DDL and data changes. Applied application migrations remain immutable. The package has no
-upgrade command; copying reviewed SQL is the upgrade workflow.
-
-Before reversing version 3, stop producers/workers, finish outstanding cancellation requests and
-remove cancelled attempt history using normal terminal-record removal/pruning. The down SQL refuses
-to erase active intent or incompatible attempt outcomes. Version 2 → 1 also refuses while keyed
-schedules remain; remove or convert them first. Reverse pairs in reverse order. Existing work and
-business effects are not undone by reverting storage.
+Neither setup, migrate up nor worker startup upgrades existing storage. Repeated installation only
+validates compatibility; it never resets an incompatible schema. If an application script imports
+jobsMigration directly, declare pgclear-jobs as a direct dependency under strict package managers.
 
 ## Runtime grants
 

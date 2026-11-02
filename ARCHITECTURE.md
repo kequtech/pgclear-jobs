@@ -20,8 +20,8 @@ without copying queue logic.
 
 One reserved `pgclear_jobs` schema stores jobs, attempts, schedules, and a compatibility marker.
 Installation/removal is explicit. One concrete up/down SQL pair serves both the standalone command
-and application-owned migration files. Storage changes ship separate explicit upgrade SQL; there is
-no automatic incremental migration engine.
+and application-owned migration files. This is the only migration pair the package exports.
+Applications author changes to existing storage; there are no version-specific upgrade resources.
 
 ## Execution path
 

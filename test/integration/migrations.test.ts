@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import test from 'node:test';
 import { jobs, installJobs, migrateJobs } from '../../src/index.js';
-import { jobsMigration, jobsUpgrade, jobsCancellationUpgrade } from '../../src/migrations.js';
+import { jobsMigration } from '../../src/migrations.js';
 import { checkSchema } from '../../src/schema.js';
 import { claimJob, finishClaim } from '../../src/claims.js';
 import { definition, execute, pool, url } from '../helpers/database.js';
@@ -16,73 +16,20 @@ import { definition, execute, pool, url } from '../helpers/database.js';
 const run = promisify(execFile);
 const cli = fileURLToPath(new URL('../../src/cli.js', import.meta.url));
 
-test('version 1 upgrades preserve outstanding work and match fresh storage; reversal protects keyed schedules', async () => {
+test('an older installation rejects startup and installation without changing retained work', async () => {
   try {
     await applySql(jobsMigration.down);
     await applySql(await readFile('test/fixtures/schema-v1.sql', 'utf8'));
-    const def = definition({ retryDelayMs: 60000 });
-    const head = await jobs(pool).request(def, 1, { key: 'upgrade' });
+    const def = definition();
+    const head = await jobs(pool).request(def, 1, { key: 'retained' });
     await claimJob(execute, [def.name], 300000);
-    await jobs(pool).request(def, 2, { key: 'upgrade' });
-    const retryDef = definition({ retryDelayMs: 60000 });
-    await jobs(pool).send(retryDef, 3);
-    const retry = (await claimJob(execute, [retryDef.name], 30000)).claim!;
-    await pool.queryClassic(
-      `UPDATE pgclear_jobs.jobs SET state='pending', claim_token=NULL, lease_until=NULL, deadline=NULL,
-      run_at=clock_timestamp()+interval '1 minute', last_error='retry' WHERE id=$1`,
-      [retry.id],
-    );
-    await jobs(pool).send(def, 4, { delayMs: 60000 });
-    await pool.queryClassic(
-      `INSERT INTO pgclear_jobs.schedules(id,name,payload,policy,cron,time_zone,next_run_at)
-      SELECT $1, name, payload, policy, '* * * * *', 'UTC', clock_timestamp() + interval '1 day'
-      FROM pgclear_jobs.jobs WHERE id = $2`,
-      [randomUUID(), head.id],
-    );
-    await assert.rejects(checkSchema(execute), /incompatible/);
-    await assert.rejects(migrateJobs(pool), /upgrade migration/);
+    await jobs(pool).request(def, 2, { key: 'retained' });
+    await jobs(pool).send(def, 3, { delayMs: 60000 });
     const before = await snapshot();
-    await assert.rejects(applySql(jobsUpgrade.up + '\nSELECT 1/0;'));
+    await assert.rejects(checkSchema(execute), /incompatible/);
+    await assert.rejects(migrateJobs(pool), /migrate existing storage through your application/);
     assert.deepEqual(await snapshot(), before);
-    await applySql(jobsUpgrade.up);
-    await assert.rejects(checkSchema(execute), /incompatible/);
-    const upgraded = (await snapshot()) as { schedules: Record<string, unknown>[] };
-    assert.deepEqual(
-      { ...upgraded, schedules: upgraded.schedules.map(({ request_key: _, ...s }) => s) },
-      before,
-    );
-    await assert.rejects(applySql(jobsUpgrade.up), /Expected Jobs storage version 1/);
-    const catalog = async () =>
-      (
-        await pool.queryClassic(`SELECT column_name, data_type, is_nullable, column_default
-      FROM information_schema.columns WHERE table_schema='pgclear_jobs' ORDER BY table_name, ordinal_position`)
-      ).rows;
-    const beforeCancellation = await snapshot();
-    await assert.rejects(applySql(jobsCancellationUpgrade.up + '\nSELECT 1/0;'));
-    assert.deepEqual(await snapshot(), beforeCancellation);
-    await applySql(jobsCancellationUpgrade.up);
-    await checkSchema(execute);
-    const cancellationSnapshot = (await snapshot()) as { jobs: Record<string, unknown>[] };
-    assert.deepEqual(
-      {
-        ...cancellationSnapshot,
-        jobs: cancellationSnapshot.jobs.map(({ cancel_requested_at: _, ...j }) => j),
-      },
-      beforeCancellation,
-    );
-    await assert.rejects(applySql(jobsCancellationUpgrade.up), /Expected Jobs storage version 2/);
-    const upgradedCatalog = await catalog();
-    await jobs(pool).schedule(def, 9, { cron: '* * * * *', requestKey: 'upgrade' });
-    await applySql(jobsCancellationUpgrade.down);
-    await assert.rejects(applySql(jobsUpgrade.down), /Remove or convert/);
-    await jobs(pool).unschedule(def);
-    await applySql(jobsUpgrade.down);
-    await assert.rejects(checkSchema(execute), /incompatible/);
-    await applySql(jobsUpgrade.up);
-    await applySql(jobsCancellationUpgrade.up);
-    await applySql(jobsMigration.down);
-    await applySql(jobsMigration.up);
-    assert.deepEqual(await catalog(), upgradedCatalog);
+    assert.equal((await jobs(pool).get(head.id))?.state, 'running');
   } finally {
     await migrateJobs(pool, 'down');
     await installJobs(pool);
@@ -207,7 +154,7 @@ test('a failed application migration rolls back installation or complete namespa
   }
 });
 
-test('an incompatible schema requires intentional down/up; invalid directions fail before SQL', async () => {
+test('incompatible storage is preserved; explicit removal and invalid-direction validation remain available', async () => {
   const original = await jobs(pool).send(definition(), 1);
   try {
     await pool.queryClassic('UPDATE pgclear_jobs.schema_version SET version = 99');
@@ -224,30 +171,6 @@ test('an incompatible schema requires intentional down/up; invalid directions fa
     };
     // @ts-expect-error Reject obsolete version targeting before SQL.
     await assert.rejects(migrateJobs(unused, { toVersion: 0 }), TypeError);
-  } finally {
-    await migrateJobs(pool, 'down');
-    await installJobs(pool);
-  }
-});
-
-test('cancellation downgrade refuses durable requests and cancelled attempt history', async () => {
-  try {
-    const def = definition();
-    const job = await jobs(pool).send(def, 1);
-    await claimJob(execute, [def.name], 30000);
-    await jobs(pool).cancel(job.id);
-    await assert.rejects(applySql(jobsCancellationUpgrade.down), /Finish cancellation/);
-    await pool.queryClassic(
-      "UPDATE pgclear_jobs.jobs SET lease_until=clock_timestamp()-interval '1 second' WHERE id=$1",
-      [job.id],
-    );
-    const { recoverClaims } = await import('../../src/claims.js');
-    await recoverClaims(execute);
-    await assert.rejects(
-      applySql(jobsCancellationUpgrade.down),
-      /remove cancelled attempt history/,
-    );
-    await jobs(pool).remove(job.id);
   } finally {
     await migrateJobs(pool, 'down');
     await installJobs(pool);

@@ -5,7 +5,7 @@ import type { Execute } from './storage.js';
 export { notificationChannel } from './schema-sql.js';
 
 const incompatible =
-  'pgclear-jobs schema is incompatible or missing; install current storage or apply the explicit Jobs upgrade migration before starting workers. Never reset existing storage to upgrade.';
+  'pgclear-jobs schema is incompatible or missing; install current storage or migrate existing storage through your application before starting workers. Never reset existing storage to upgrade.';
 
 /** Explicit installation/removal; neither producers nor workers apply schema changes. */
 export async function migrateJobs(

@@ -5,9 +5,9 @@
 - Extend cancel(id) to persist running-job cancellation across processes. Workers use the existing
   handler signal and heartbeat; completion, rollback, retry suppression and recovery remain fenced.
   Expose cancelRequestedAt and cancelled attempt history/events. Pending cancellation stays immediate.
-- Require storage version 3. Copy jobsCancellationUpgrade from /migrations into a new application
-  migration after stopping old producers/workers. Version 1 first needs the existing jobsUpgrade.
-  Saved installation/upgrade SQL remains unchanged; no automatic upgrade command is added.
+- Require storage version 3. Export only the canonical jobsMigration.up/down for the current schema.
+  Applications author changes to existing storage in new migrations after stopping old producers/workers;
+  saved migration history remains unchanged. No version-specific upgrade SQL or upgrade command.
 - Document cancellation races, detection latency and the distinction between queue state and external
   effects. Reuse one host shutdown signal; detailed driver contracts stay with pgclear.
 
@@ -28,10 +28,10 @@
   `done` promises, preserving runner and pool ownership.
 - Add schedule `requestKey` so recurring, manual and startup triggers share existing keyed request
   semantics. Shared jobs have no exclusive schedule occurrence metadata.
-- Storage version 2 adds the nullable schedule request key. Existing installations require the
-  explicit `jobsUpgrade` SQL from `/migrations`; stop old producers/workers first. Installation and
-  Tenon's setup still never upgrade or rewrite saved application migrations automatically.
-- Ship a tested runtime-role grants example and reject downgrades that would discard keyed schedules.
+- Storage version 2 adds the nullable schedule request key. Existing installations need an
+  application-authored migration; stop old producers/workers first. Installation and Tenon's setup
+  never upgrade or rewrite saved application migrations automatically.
+- Ship a tested runtime-role grants example.
 
 ## 0.2.0
 

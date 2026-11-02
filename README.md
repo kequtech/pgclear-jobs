@@ -44,9 +44,9 @@ at the application host, as shown in [Hosting](docs/hosting.md#startup-and-shutd
 | Bind another pgclear-based query API                                  | [Integration](docs/integration.md) |
 
 Jobs 0.3.0 uses storage version 3 and supports cancelling running jobs through the same cancel(id)
-method. Existing version-2 storage needs jobsCancellationUpgrade in a new application migration;
-version-1 storage first needs jobsUpgrade. Stop old producers/workers before migrating. Never reset
-queued work to upgrade. See [Storage](docs/storage.md).
+method. The package exports one canonical migration up/down pair for the current schema. Applications
+author changes to existing storage in their own migrations, preserving queued work and saved history.
+Stop old producers/workers before changing storage. See [Storage](docs/storage.md).
 The guides, SQL resources and examples ship with the package; read the installed version's docs.
 
 pgclear owns connection/transaction/cancellation behavior. Jobs owns claims, retries, scheduling,
