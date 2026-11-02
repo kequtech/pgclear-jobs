@@ -16,10 +16,16 @@ const retryDelay = `LEAST((j.policy->>'retryMaxDelayMs')::double precision,
   CASE WHEN (j.policy->>'retryJitter')::boolean THEN 0.5 + random() / 2 ELSE 1 END`;
 const retryTime = `clock_timestamp() + ${retryDelay} * interval '1 millisecond'`;
 
-function outcomeUpdate(success: string, retry: string, message: string, runAt = retryTime): string {
-  return `state = CASE WHEN ${success} THEN 'completed' WHEN ${retry} THEN 'pending' ELSE 'failed' END,
-    run_at = CASE WHEN ${success} THEN j.run_at ELSE ${runAt} END,
-    finished_at = CASE WHEN ${success} OR NOT (${retry}) THEN clock_timestamp() ELSE NULL END,
+function outcomeUpdate(
+  success: string,
+  retry: string,
+  message: string,
+  runAt = retryTime,
+  cancelled = 'false',
+): string {
+  return `state = CASE WHEN ${cancelled} THEN 'cancelled' WHEN ${success} THEN 'completed' WHEN ${retry} THEN 'pending' ELSE 'failed' END,
+    run_at = CASE WHEN ${cancelled} OR ${success} THEN j.run_at ELSE ${runAt} END,
+    finished_at = CASE WHEN ${cancelled} OR ${success} OR NOT (${retry}) THEN clock_timestamp() ELSE NULL END,
     last_error = ${message}, updated_at = clock_timestamp(),
     claim_token = NULL, lease_until = NULL, deadline = NULL`;
 }
@@ -67,20 +73,20 @@ export async function renewClaim(
   execute: Execute,
   claim: Claim,
   leaseMs: number,
-): Promise<boolean> {
+): Promise<boolean | 'cancelled'> {
   // Check time after acquiring the row lock. A lock-only wait does not cause
   // PostgreSQL to re-evaluate predicates already checked on the target row.
-  const { rows } = await execute<{ id: string }>(
+  const { rows } = await execute<{ id: string; cancel_requested_at: string | null }>(
     `WITH owned AS MATERIALIZED (
        SELECT id, lease_until, deadline FROM pgclear_jobs.jobs
        WHERE id = $1::uuid AND claim_token = $2::uuid AND state = 'running' FOR UPDATE
      ) UPDATE pgclear_jobs.jobs j SET lease_until = LEAST(owned.deadline,
        clock_timestamp() + $3::double precision * interval '1 millisecond')
      FROM owned WHERE j.id = owned.id
-       AND owned.lease_until > clock_timestamp() AND owned.deadline > clock_timestamp() RETURNING j.id`,
+       AND owned.lease_until > clock_timestamp() AND owned.deadline > clock_timestamp() RETURNING j.id, j.cancel_requested_at`,
     [claim.id, claim.claim_token, leaseMs],
   );
-  return rows.length === 1;
+  return rows[0]?.cancel_requested_at ? 'cancelled' : rows.length === 1;
 }
 
 export interface AttemptOutcome {
@@ -96,7 +102,7 @@ export async function finishAttempt(
 ): Promise<AttemptOutcome | null> {
   const { rows } = await execute<{ state: AttemptOutcome['state']; run_at: string }>(
     `WITH owned AS MATERIALIZED (
-      SELECT id, lease_until, deadline FROM pgclear_jobs.jobs
+      SELECT id, lease_until, deadline, cancel_requested_at FROM pgclear_jobs.jobs
       WHERE id = $1::uuid AND claim_token = $2::uuid AND state = 'running' FOR UPDATE
     ), finished AS (
       UPDATE pgclear_jobs.jobs j SET ${outcomeUpdate(
@@ -106,7 +112,8 @@ export async function finishAttempt(
         `GREATEST(${retryTime}, $5::timestamptz)`,
       )}
       FROM owned WHERE j.id = owned.id
-        AND owned.lease_until > clock_timestamp() AND ($3::text IS NOT NULL OR owned.deadline > clock_timestamp())
+        AND owned.lease_until > clock_timestamp() AND owned.cancel_requested_at IS NULL
+        AND ($3::text IS NOT NULL OR owned.deadline > clock_timestamp())
       RETURNING j.id, j.state, to_jsonb(j.run_at) AS run_at
     ), history AS (
       UPDATE pgclear_jobs.attempts SET finished_at = clock_timestamp(), error = $3,
@@ -140,14 +147,39 @@ export async function recoverClaims(execute: Execute, limit = 100): Promise<numb
       WHERE state = 'running' AND lease_until <= clock_timestamp()
       ORDER BY lease_until, id LIMIT $1 FOR UPDATE SKIP LOCKED
     ), recovered AS (
-      UPDATE pgclear_jobs.jobs j SET ${outcomeUpdate('false', remainingAttempts, "'Attempt lease expired'")}
-      FROM expired e WHERE j.id = e.id RETURNING j.id
+      UPDATE pgclear_jobs.jobs j SET ${outcomeUpdate(
+        'false',
+        remainingAttempts,
+        "CASE WHEN j.cancel_requested_at IS NOT NULL THEN NULL ELSE 'Attempt lease expired' END",
+        retryTime,
+        'j.cancel_requested_at IS NOT NULL',
+      )}
+      FROM expired e WHERE j.id = e.id RETURNING j.id, j.cancel_requested_at
     ), history AS (
-      UPDATE pgclear_jobs.attempts SET outcome = 'expired', error = 'Attempt lease expired',
+      UPDATE pgclear_jobs.attempts a SET
+        outcome = CASE WHEN r.cancel_requested_at IS NOT NULL THEN 'cancelled' ELSE 'expired' END,
+        error = CASE WHEN r.cancel_requested_at IS NOT NULL THEN NULL ELSE 'Attempt lease expired' END,
         finished_at = clock_timestamp()
-      WHERE token IN (SELECT claim_token FROM expired) AND job_id IN (SELECT id FROM recovered)
+      FROM recovered r WHERE a.job_id = r.id AND a.token IN (SELECT claim_token FROM expired)
     ) SELECT id FROM recovered`,
     [limit],
   );
   return rows.length;
+}
+
+/** Acknowledge cancellation after handler cleanup; recovery handles lost workers. */
+export async function finishCancellation(execute: Execute, claim: Claim): Promise<boolean> {
+  const { rows } = await execute<{ id: string }>(
+    `WITH cancelled AS (
+      UPDATE pgclear_jobs.jobs j SET state = 'cancelled', finished_at = clock_timestamp(),
+        updated_at = clock_timestamp(), claim_token = NULL, lease_until = NULL, deadline = NULL
+      WHERE id = $1::uuid AND claim_token = $2::uuid AND state = 'running'
+        AND cancel_requested_at IS NOT NULL RETURNING id
+    ), history AS (
+      UPDATE pgclear_jobs.attempts SET outcome = 'cancelled', finished_at = clock_timestamp()
+      WHERE token = $2::uuid AND job_id IN (SELECT id FROM cancelled)
+    ) SELECT id FROM cancelled`,
+    [claim.id, claim.claim_token],
+  );
+  return rows.length === 1;
 }

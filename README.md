@@ -43,8 +43,10 @@ at the application host, as shown in [Hosting](docs/hosting.md#startup-and-shutd
 | Host a worker, observe readiness or run it beside Next.js             | [Hosting](docs/hosting.md)         |
 | Bind another pgclear-based query API                                  | [Integration](docs/integration.md) |
 
-Jobs 0.2.1 and later use storage version 2. Existing version-1 installations need explicit upgrade SQL in a
-new application migration, with old producers/workers stopped. Never reset queued work to upgrade.
+Jobs 0.3.0 uses storage version 3 and supports cancelling running jobs through the same cancel(id)
+method. Existing version-2 storage needs jobsCancellationUpgrade in a new application migration;
+version-1 storage first needs jobsUpgrade. Stop old producers/workers before migrating. Never reset
+queued work to upgrade. See [Storage](docs/storage.md).
 The guides, SQL resources and examples ship with the package; read the installed version's docs.
 
 pgclear owns connection/transaction/cancellation behavior. Jobs owns claims, retries, scheduling,

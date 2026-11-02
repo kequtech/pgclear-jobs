@@ -38,7 +38,7 @@ for (const operation of ['complete', 'renew'] as const) {
       );
       const session = await pool.acquire();
       const contender: Execute = (text, values) => session.queryClassic(text, values);
-      let pending: Promise<boolean> | undefined;
+      let pending: Promise<boolean | 'cancelled'> | undefined;
       try {
         await pool.transaction(async (tx) => {
           await tx.queryClassic('SELECT id FROM pgclear_jobs.jobs WHERE id = $1 FOR UPDATE', [

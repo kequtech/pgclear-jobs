@@ -26,32 +26,47 @@ These contain no outer BEGIN/COMMIT; the runner supplies the transaction. Commit
 make historical migrations import a live installer or the newest package. A query-library CLI may copy
 this pair into its migration directory; ownership of saved SQL remains with the application.
 
-## Upgrade storage version 1 to 2
+## Upgrade storage
 
-Jobs 0.2.1 uses storage version 2, adding nullable `schedules.request_key`. Existing jobs, attempts,
-retry timing, claims, successors and ordinary schedules retain their state. New installations use
-`jobsMigration`; existing installations use a **new** migration containing `jobsUpgrade.up`:
+Jobs 0.3.0 requires storage version 3. Upgrades are concrete SQL, saved as new application migrations:
+
+| Existing storage     | Export from @kequtech/pgclear-jobs/migrations | Result                                                |
+| -------------------- | --------------------------------------------- | ----------------------------------------------------- |
+| 1 (Jobs 0.2.0)       | jobsUpgrade                                   | 2: keyed schedules                                    |
+| 2 (Jobs 0.2.1/0.2.2) | jobsCancellationUpgrade                       | 3: durable cancellation and cancelled attempt history |
+
+For version 1, apply both pairs in order. Fresh installations use jobsMigration directly.
+An application script importing these exports must declare pgclear-jobs directly; a transitive
+installation through an ORM does not grant direct imports under strict package managers.
+
+Choose the next unused migration number and save the SQL. For version 2, for example:
 
 ```ts
-import { jobsUpgrade } from '@kequtech/pgclear-jobs/migrations';
-// { from: 1, to: 2, up: string, down: string }
+import { writeFile } from 'node:fs/promises';
+import { jobsCancellationUpgrade } from '@kequtech/pgclear-jobs/migrations';
+
+await writeFile('migrations/0005_jobs_cancellation.up.sql', jobsCancellationUpgrade.up, {
+  flag: 'wx',
+});
+await writeFile('migrations/0005_jobs_cancellation.down.sql', jobsCancellationUpgrade.down, {
+  flag: 'wx',
+});
 ```
 
-1. Stop producers and schedulers/workers using the old package. Await normal worker cleanup; do
-   not reset running records or discard outstanding work.
-2. Save/review the exported upgrade SQL as a new immutable application migration. Apply it in a
-   transaction as the storage owner. It checks the source version and takes the installation lock.
-3. Update all producers/workers to the new package, verify grants, then restart them. Old workers
-   reject version 2, and new workers reject version 1. Mixed-version operation is unsupported.
+1. Stop producers and schedulers/workers using the old package; await normal cleanup.
+2. Review/commit the new pair. Apply up in a transaction as the storage owner through the existing
+   migration runner. The SQL checks its source version and takes the installation lock.
+3. Verify grants and restart matching producers/workers. Mixed storage/package versions reject.
 
-Neither `migrate up` nor worker startup applies this upgrade. A failed upgrade transaction leaves
-version 1 and its data intact. Repeated upgrade SQL rejects the wrong source version; the application's
-migration history owns exactly-once application. The CLI has no automatic upgrade engine.
+Neither setup, migrate up nor worker startup upgrades existing storage. A failed migration rolls
+back its DDL and data changes. Applied application migrations remain immutable. The package has no
+upgrade command; copying reviewed SQL is the upgrade workflow.
 
-For rollback, stop producers/workers again and remove or convert every keyed schedule to an ordinary
-schedule. `jobsUpgrade.down` refuses while request keys remain, then removes only the new column and
-restores version 1. Shared jobs remain ordinary keyed requests; the old package can execute them.
-Reversal does not undo jobs or business effects produced while version 2 was active.
+Before reversing version 3, stop producers/workers, finish outstanding cancellation requests and
+remove cancelled attempt history using normal terminal-record removal/pruning. The down SQL refuses
+to erase active intent or incompatible attempt outcomes. Version 2 → 1 also refuses while keyed
+schedules remain; remove or convert them first. Reverse pairs in reverse order. Existing work and
+business effects are not undone by reverting storage.
 
 ## Runtime grants
 

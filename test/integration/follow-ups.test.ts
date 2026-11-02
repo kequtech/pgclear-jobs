@@ -121,7 +121,6 @@ for (const ending of [
       assert.equal(await finishClaim(execute, current, null), false);
     } else if (ending === 'cancelled') {
       // Use a real retry transition before cancellation rather than manufacturing a pending row.
-      await assert.rejects(jobs(pool).cancel(original.id), JobStateError);
       await finishClaim(execute, current, 'temporary');
       await jobs(pool).cancel(original.id);
     } else {

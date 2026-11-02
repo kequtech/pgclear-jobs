@@ -61,7 +61,7 @@ test('packed core, migration SQL and integration types work with the required pg
       join(directory, 'consumer.mjs'),
       `
       import { defineJob, defineWorker, jobs, runJobs, startJobs, installJobs } from '@kequtech/pgclear-jobs';
-      import { jobsMigration, jobsUpgrade } from '@kequtech/pgclear-jobs/migrations';
+      import { jobsMigration, jobsUpgrade, jobsCancellationUpgrade } from '@kequtech/pgclear-jobs/migrations';
       import { createJobsIntegration } from '@kequtech/pgclear-jobs/integration';
       import { createPool } from '@kequtech/pgclear';
       const spec = defineJob({ name: 'producer' });
@@ -77,7 +77,7 @@ test('packed core, migration SQL and integration types work with the required pg
         onReady() { throw new Error('A pre-aborted packaged worker announced readiness'); },
       });
       await pool.close();
-      if (jobsUpgrade.from !== 1 || jobsUpgrade.to !== 2) throw new Error('Missing explicit upgrade');
+      if (jobsUpgrade.from !== 1 || jobsUpgrade.to !== 2 || jobsCancellationUpgrade.from !== 2 || jobsCancellationUpgrade.to !== 3) throw new Error('Missing explicit upgrade');
       const unused = createPool({});
       if ((await jobs(unused).getMany([])).length) throw new Error('Unexpected bulk records');
       const handle = startJobs(unused, [definition], {signal:AbortSignal.abort()});

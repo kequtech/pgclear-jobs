@@ -60,5 +60,5 @@ queue DDL policy into that runner.
 
 Use one compatible pgclear resolution across the application, Jobs and adapter. Test custom-scope
 handlers here; the consuming query library tests its guards, observations and facade lifetime.
-[Tenon's integration guide](https://github.com/kequtech/tenon-orm/blob/main/docs/jobs.md) describes its
-ORM-specific surface. Jobs has no Tenon dependency.
+Tenon's own installed Jobs guide documents its ORM-specific surface. Use the query library's
+installed-documentation resolver when available. Jobs has no Tenon dependency.

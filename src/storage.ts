@@ -25,6 +25,8 @@ export interface Job<Payload = unknown> {
   readonly createdAt: Date;
   readonly updatedAt: Date;
   readonly finishedAt: Date | null;
+  /** Durable cancellation intent; running work may still be stopping. */
+  readonly cancelRequestedAt: Date | null;
   readonly lastError: string | null;
   readonly scheduleId: string | null;
   readonly scheduledFor: Date | null;
@@ -66,6 +68,7 @@ export interface StoredJob {
   created_at: string;
   updated_at: string;
   finished_at: string | null;
+  cancel_requested_at: string | null;
   last_error: string | null;
   claim_token: string | null;
   deadline: string | null;
@@ -88,6 +91,7 @@ export function jobRecord<Payload = unknown>(row: StoredJob): Job<Payload> {
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at),
     finishedAt: row.finished_at === null ? null : new Date(row.finished_at),
+    cancelRequestedAt: row.cancel_requested_at ? new Date(row.cancel_requested_at) : null,
     lastError: row.last_error,
     scheduleId: row.schedule_id ?? null,
     scheduledFor: row.scheduled_for ? new Date(row.scheduled_for) : null,

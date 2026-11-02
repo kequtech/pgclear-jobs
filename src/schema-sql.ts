@@ -1,4 +1,4 @@
-export const schemaVersion = 2;
+export const schemaVersion = 3;
 export const notificationChannel = 'pgclear_jobs_ready';
 export const migrationLockSql = 'SELECT pg_advisory_xact_lock(187032712, 1)';
 export const downSql = 'DROP SCHEMA IF EXISTS pgclear_jobs CASCADE';
@@ -29,6 +29,7 @@ export const upStatements: readonly string[] = [
     schedule_id uuid,
     scheduled_for timestamptz,
     retry_of uuid,
+    cancel_requested_at timestamptz,
     CHECK ((state = 'running') = (claim_token IS NOT NULL AND lease_until IS NOT NULL AND deadline IS NOT NULL)),
     CHECK (blocked_by IS NULL OR (blocked_by <> id AND key IS NOT NULL AND state = 'pending' AND attempt_count = 0))
   )`,
@@ -54,7 +55,7 @@ export const upStatements: readonly string[] = [
     token uuid NOT NULL UNIQUE,
     started_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     finished_at timestamptz,
-    outcome text CHECK (outcome IN ('completed', 'failed', 'expired')),
+    outcome text CHECK (outcome IN ('completed', 'failed', 'expired', 'cancelled')),
     error text,
     PRIMARY KEY (job_id, number)
   )`,

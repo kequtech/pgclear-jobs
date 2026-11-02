@@ -14,7 +14,7 @@ export interface HandlerContext {
   readonly id: string;
   readonly attempt: number;
   readonly maxAttempts: number;
-  /** Cooperative cancellation on timeout, lost ownership, or shutdown expiry. */
+  /** Cooperative cancellation on cancellation, timeout, lost ownership, or shutdown expiry. */
   readonly signal: AbortSignal;
   readonly scheduledFor: Date | null;
 }

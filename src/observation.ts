@@ -18,12 +18,14 @@ export interface HandlerFailure extends AttemptInfo {
 }
 
 export type HandlerErrorAction = 'continue' | 'stop';
-export type AttemptAbandonReason = 'leaseLost' | 'deadlineExceeded' | 'runnerStopped';
+export type AttemptAbandonReason =
+  'leaseLost' | 'deadlineExceeded' | 'runnerStopped' | 'cancelRequested';
 
 /** Local best-effort observations, not a durable or deployment-wide event stream. */
 export type RunnerEvent =
   | (AttemptInfo & { readonly type: 'attemptStarted' })
   | (AttemptInfo & { readonly type: 'attemptCompleted' })
+  | (AttemptInfo & { readonly type: 'attemptCancelled' })
   | (AttemptInfo & {
       readonly type: 'attemptFailed';
       readonly error: unknown;

@@ -1,7 +1,7 @@
 import { DriverError } from '@kequtech/pgclear';
 import { errorText, JobError } from './errors.js';
 import type { HandlerContext, JobDefinition } from './definition.js';
-import { finishAttempt, renewClaim } from './claims.js';
+import { finishAttempt, finishCancellation, renewClaim } from './claims.js';
 import type { AttemptOutcome, Claim } from './claims.js';
 import type { Execute } from './storage.js';
 import type { JobsIntegration } from './integration.js';
@@ -79,6 +79,7 @@ export async function executeAttempt<Database, Tx>(
       );
     return userHandler;
   };
+  let completionRefused = false;
   const completion: { committed: AttemptOutcome | null } = { committed: null };
   const handler = Promise.resolve().then(async (): Promise<HandlerOutcome | undefined> => {
     if (signal.aborted) return;
@@ -102,6 +103,7 @@ export async function executeAttempt<Database, Tx>(
           try {
             const finished = await finishAttempt(integration.execute(tx), claim, null);
             if (!finished) {
+              completionRefused = true;
               lose('leaseLost', new Error('Job claim lost'));
               signal.throwIfAborted();
             }
@@ -126,7 +128,12 @@ export async function executeAttempt<Database, Tx>(
       await pause(Math.max(1, Math.floor(interval)), monitors.signal);
       if (monitors.signal.aborted) break;
       const renewingAt = performance.now();
-      if (!(await renewClaim(execute, claim, leaseMs))) {
+      const renewal = await renewClaim(execute, claim, leaseMs);
+      if (renewal === 'cancelled') {
+        lose('cancelRequested', new Error('Job cancellation requested'));
+        break;
+      }
+      if (!renewal) {
         lose('leaseLost', new Error('Job claim lost'));
         break;
       }
@@ -191,7 +198,10 @@ export async function executeAttempt<Database, Tx>(
                 error: result.error,
                 retryAt: finished.state === 'pending' ? finished.runAt : null,
               };
-        } else lose('leaseLost', new Error('Job claim lost'));
+        } else {
+          completionRefused = true;
+          lose('leaseLost', new Error('Job claim lost'));
+        }
       }
     }
   } catch (error) {
@@ -218,6 +228,16 @@ export async function executeAttempt<Database, Tx>(
   }
   // A commit can settle after cancellation won the race. Observe it only once acknowledged.
   if (completion.committed) outcomeEvent = { ...info, type: 'attemptCompleted' };
+  if (
+    !outcomeEvent &&
+    !failures.length &&
+    !abandon.aborted &&
+    (abandoned === 'cancelRequested' || completionRefused)
+  ) {
+    await settleOrAbort(userHandler, abandon);
+    if (!abandon.aborted && (await finishCancellation(execute, claim)))
+      outcomeEvent = { ...info, type: 'attemptCancelled' };
+  }
   if (outcomeEvent) emit(outcomeEvent);
   if (failures.length === 1) throw failures[0];
   if (failures.length > 1) throw new AggregateError(failures, 'Job attempt and cleanup failed.');

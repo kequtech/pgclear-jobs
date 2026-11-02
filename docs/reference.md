@@ -71,7 +71,7 @@ options reject instead of silently changing behavior.
 | attempts(id,{limit?}?)                   | Latest first; default 100, max 1000; missing returns []                                             |
 | update(spec,id,payload)                  | Replace pending payload of the selected definition                                                  |
 | reschedule(id,runAt)                     | Set a pending execution time                                                                        |
-| cancel(id)                               | Cancel pending/backoff/successor work; release its successor                                        |
+| cancel(id)                               | Cancel pending work or request running cancellation; repeated calls are safe                        |
 | retry(id)                                | Fresh linked job from a failed source with copied policy/payload/key/occurrence and fresh budget    |
 | remove(id)                               | Delete terminal record and attempts; false if absent                                                |
 | prune(spec,{before,states?,limit?})      | Bounded terminal cleanup; default completed/cancelled and limit 100, max 1000                       |
@@ -81,13 +81,13 @@ remain unknown for heterogeneous ID reads. find cursors retain database timestam
 work after the cursor row is removed; pagination is live. states:[] matches nothing. Pending edits
 preserve policy/history/budget. Retry refuses an occupied key or schedule; unkeyed retries can create
 multiple jobs. Missing mutation targets raise JobNotFoundError, ineligible state/name/conflicts raise
-JobStateError. Both expose jobId. Removal/pruning never delete outstanding work; prune uses
+JobStateError. Both expose jobId. See [cancellation](reliability.md#cancel-a-job) for signal and completion races. Removal/pruning never delete outstanding work; prune uses
 finishedAt < before and skips locked rows. Failed history needs explicit inclusion.
 
 Job fields: id, name, payload, nullable key/blockedBy, state (pending/running/completed/failed/cancelled),
-attempts, saved policy, runAt/createdAt/updatedAt, nullable finishedAt/lastError/scheduleId/scheduledFor/
+attempts, saved policy, runAt/createdAt/updatedAt, nullable finishedAt/cancelRequestedAt/lastError/scheduleId/scheduledFor/
 retryOf, opaque cursor. Attempt fields: number, startedAt, nullable finishedAt/error and outcome
-(completed/failed/expired/null). Statistics describe retained rows, not lifetime throughput. Pending
+(completed/failed/expired/cancelled/null). Statistics describe retained rows, not lifetime throughput. Pending
 includes retry backoff and blocked successors. Related IDs are not guarantees those records remain.
 
 ## Recurring schedules
@@ -144,13 +144,14 @@ retention and external effects.
 
 ## Observation and error policy
 
-| Event            | Evidence                                                                                 |
-| ---------------- | ---------------------------------------------------------------------------------------- |
-| attemptStarted   | This runner invokes the handler after acquiring its scope                                |
-| attemptCompleted | Completion acknowledged, including managed commit when applicable                        |
-| attemptFailed    | Failure bookkeeping acknowledged; original error and saved retryAt (Date/null)           |
-| attemptAbandoned | No confirmed outcome after cancellation; reason leaseLost/deadlineExceeded/runnerStopped |
-| runnerFailed     | Final startup/runtime/cleanup error, optional originating attempt                        |
+| Event            | Evidence                                                                                                 |
+| ---------------- | -------------------------------------------------------------------------------------------------------- |
+| attemptStarted   | This runner invokes the handler after acquiring its scope                                                |
+| attemptCancelled | Cancellation acknowledged after handler cleanup; recovery can also cancel lost claims                    |
+| attemptCompleted | Completion acknowledged, including managed commit when applicable                                        |
+| attemptFailed    | Failure bookkeeping acknowledged; original error and saved retryAt (Date/null)                           |
+| attemptAbandoned | No confirmed outcome after cancellation; reason leaseLost/deadlineExceeded/runnerStopped/cancelRequested |
+| runnerFailed     | Final startup/runtime/cleanup error, optional originating attempt                                        |
 
 AttemptInfo contains id, name, attempt, maxAttempts and scheduledFor. Events omit payload/transaction;
 identity metadata/Dates are detached. They are local/non-durable, exclude other runners and recovery,
@@ -177,5 +178,5 @@ use pgclear's outcome evidence when choosing reconciliation/escalation policy.
 `pgclear-jobs migrate [up|down]`. Help needs no credentials. No worker/record facade performs DDL.
 
 `jobsMigration.up/down` from `/migrations` is fresh-install SQL. `jobsUpgrade` is {from:1,to:2,up,down}
-for a separate reviewed application migration. Caller supplies the transaction. Installation does
+for the version-1-to-2 migration. jobsCancellationUpgrade is {from:2,to:3,up,down}. Caller supplies the transaction. Installation does
 not perform this upgrade. [Storage](storage.md) owns order, reversal restrictions and grants.

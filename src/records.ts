@@ -45,7 +45,7 @@ export interface Attempt {
   readonly number: number;
   readonly startedAt: Date;
   readonly finishedAt: Date | null;
-  readonly outcome: 'completed' | 'failed' | 'expired' | null;
+  readonly outcome: 'completed' | 'failed' | 'expired' | 'cancelled' | null;
   readonly error: string | null;
 }
 
@@ -239,12 +239,22 @@ export class JobRecords {
     );
   }
 
+  /** Cancel pending work immediately, or request cooperative cancellation of its running attempt. */
   async cancel(id: string): Promise<Job> {
-    return this.mutate(
-      id,
-      "state = 'cancelled', blocked_by = NULL, finished_at = clock_timestamp()",
-      [],
+    const { rows } = await this.execute<{ record: StoredJob }>(
+      `UPDATE pgclear_jobs.jobs j SET
+         cancel_requested_at = COALESCE(cancel_requested_at, clock_timestamp()),
+         state = CASE WHEN state = 'pending' THEN 'cancelled' ELSE state END,
+         blocked_by = CASE WHEN state = 'pending' THEN NULL ELSE blocked_by END,
+         finished_at = CASE WHEN state = 'pending' THEN clock_timestamp() ELSE finished_at END,
+         updated_at = clock_timestamp()
+       WHERE id = $1::uuid AND state IN ('pending', 'running', 'cancelled')
+       RETURNING to_jsonb(j) AS record`,
+      [uuid(id)],
     );
+    if (rows[0]) return jobRecord(rows[0].record);
+    if (!(await this.get(id))) throw new JobNotFoundError(id);
+    throw new JobStateError(id);
   }
 
   /** A fresh budget and linked job; an occupied key or schedule rejects the retry. */

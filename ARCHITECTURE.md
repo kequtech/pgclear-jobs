@@ -39,6 +39,13 @@ roll back while uncooperative JavaScript continues and retains its local slot. `
 execution and [hook semantics](docs/reference.md#observation-and-error-policy); the runner owns dispatch,
 maintenance, notifications, and shutdown.
 
+Cancellation intent lives on the job row. cancel(id) terminalizes pending work or timestamps a
+running request; heartbeats deliver it to the existing handler signal. Completion checks that same
+locked row before acknowledging success, so a managed transaction rolls back when cancellation wins.
+After callback cleanup, token-fenced acknowledgement records cancellation; expired-claim recovery
+also honors the request without retry. Uncooperative callbacks retain their local slot. No cancellation
+registry, extra listener or notification-delivery guarantee is required.
+
 A terminal trigger promotes keyed successors atomically. A request function handles head/successor
 contention within the caller's SQL scope. Recurring schedules submit ordinary jobs or keyed requests
 in bounded transactions. Automatic cleanup uses a completed/cancelled-only index and bounded batches.

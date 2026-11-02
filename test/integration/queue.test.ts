@@ -6,7 +6,13 @@ import { once } from 'node:events';
 import test from 'node:test';
 import { createPool, listen } from '@kequtech/pgclear';
 import { installJobs, jobs, JobNotFoundError, JobStateError, runJobs } from '../../src/index.js';
-import { claimJob as fetchJob, finishClaim, recoverClaims, renewClaim } from '../../src/claims.js';
+import {
+  claimJob as fetchJob,
+  finishClaim,
+  finishCancellation,
+  recoverClaims,
+  renewClaim,
+} from '../../src/claims.js';
 import type { Execute } from '../../src/storage.js';
 import { notificationChannel } from '../../src/schema.js';
 
@@ -105,15 +111,15 @@ test('record edits enforce pending state and report missing and conflicting reco
   await jobs(pool).reschedule(row.id, new Date(0));
   const claim = await claimJob(execute, [def.name], 30000);
   assert.ok(claim);
-  await assert.rejects(jobs(pool).cancel(row.id), JobStateError);
   await assert.rejects(jobs(pool).reschedule(row.id, later), JobStateError);
   await assert.rejects(jobs(pool).update(def, row.id, 3), JobStateError);
   await assert.rejects(jobs(pool).cancel(randomUUID()), JobNotFoundError);
   assert.equal(await jobs(pool).get(randomUUID()), null);
   await finishClaim(execute, claim, null);
+  await assert.rejects(jobs(pool).cancel(row.id), JobStateError);
 });
 
-test('concurrent claim and cancellation produce exactly one winner', async () => {
+test('concurrent claim and cancellation either prevents admission or persists a stop request', async () => {
   const def = definition();
   const row = await jobs(pool).send(def, 1);
   const [claim, cancellation] = await Promise.allSettled([
@@ -122,9 +128,9 @@ test('concurrent claim and cancellation produce exactly one winner', async () =>
   ]);
   assert.equal(claim.status, 'fulfilled');
   if (claim.status === 'fulfilled' && claim.value) {
-    assert.equal(cancellation.status, 'rejected');
-    if (cancellation.status === 'rejected') assert.ok(cancellation.reason instanceof JobStateError);
-    await finishClaim(execute, claim.value, null);
+    assert.equal(cancellation.status, 'fulfilled');
+    assert.equal(await finishClaim(execute, claim.value, null), false);
+    assert.equal(await finishCancellation(execute, claim.value), true);
   } else {
     assert.equal(cancellation.status, 'fulfilled');
     assert.equal((await jobs(pool).get(row.id))?.state, 'cancelled');

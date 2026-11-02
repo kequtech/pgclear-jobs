@@ -42,7 +42,7 @@ failure, preserving original driver/aggregate errors. Independent transaction fa
 handler normally remain handler failures, so they may be retried; use onHandlerError to escalate
 when the application's reconciliation policy requires it. See [hosting](hosting.md#observe-and-escalate).
 
-A rejected commit does not prove rollback. pgclear's [outcome guide](https://github.com/kequtech/pgclear/blob/main/docs/errors.md)
+A rejected commit does not prove rollback. pgclear's [outcome guide](https://github.com/kequtech/pgclear/blob/17fae30540cbc41ce2c776645437c6d265e2de96/docs/errors.md)
 and findDriverErrors expose operation evidence without guessing whole-transaction success.
 Reconcile uncertain effects through authoritative storage before replay or destructive compensation.
 Keep stable IDs/storage keys outside the uncertain transaction. An uploaded object may already be
@@ -64,9 +64,42 @@ exclusive schedule ID/date; each schedule records lastJobId. Removing/changing a
 future production, not already submitted jobs. See [schedule details](reference.md#recurring-schedules).
 
 A key orders valid claims. An expired handler may still execute JavaScript or an external effect.
-Application operations must remain safe under repetition. Cancellation of pending/backoff work can
-release its successor; cancel does not abort a running job. Cooperative running cancellation remains
-outside the current API.
+Application operations must remain safe under repetition.
+
+## Cancel a job
+
+```ts
+const job = await jobs(pool).cancel(jobId);
+// Pending work is cancelled. Running work has cancelRequestedAt set and is stopping.
+```
+
+The same call works from any process using the database. Pending work becomes cancelled immediately.
+For running work, the request is durable; the owner detects it on its next heartbeat and aborts the
+handler's existing signal. Detection normally takes up to leaseMs / 3 (10 seconds by default), plus
+database waits. Notifications are not required. Pass the handler signal to cooperative dependencies:
+
+```ts
+async handler(payload, { signal }) {
+  const response = await fetch(payload.url, { signal });
+  signal.throwIfAborted();
+  // Persist results only while the application operation is still valid.
+}
+```
+
+cancel returns after recording intent, not after the handler stops. Inspect state with get/getMany/find
+when needed. Repeated cancellation is safe. A completed/failed job rejects with JobStateError; a
+missing ID rejects with JobNotFoundError. Cancellation inside jobs(tx) becomes visible on commit.
+
+Managed handler writes roll back when cancellation wins completion. Cancellation does not retry:
+the worker acknowledges it after callback cleanup, or lease recovery marks it cancelled if the worker
+is lost. Attempt history records cancelled. A completion committed before cancellation wins remains
+completed. Terminal transition promotes a keyed successor; cancellation targets only this job, so
+cancel the successor separately if needed. Schedules continue producing until unscheduled.
+
+An uncooperative handler retains its local concurrency slot until it settles or runner shutdown
+abandons it. Lease recovery may already have made the record terminal while that JavaScript still
+runs. Cancelled is queue state, not proof that an external effect stopped or was undone. Keep business
+fences, provider idempotency and reconciliation where stale/external results matter.
 
 ## Capacity, progress and notifications
 

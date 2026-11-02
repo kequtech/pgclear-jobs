@@ -65,6 +65,19 @@ The real Next fixture tests startup, SIGINT/SIGTERM, worker failure and framewor
 a packed standalone Jobs installation without Tenon. [Runnable examples](../examples/README.md)
 also cover a producer and an ordinary worker.
 
+## Host startup order
+
+Await application startup work, such as reconciliation, before starting the runner. Await ready before
+accepting requests, and observe done for the entire host lifetime. Ready confirms storage validation
+and the readiness hook; it does not confirm notification connectivity or ongoing health.
+
+On shutdown, stop incoming requests/producers, signal the runner, await its completion and other
+application-owned tasks, then close their pools/listeners. A cancelled readiness hook may still be
+running JavaScript; the host must await its own startup task before disposing resources it uses.
+Keep the host shutdown budget longer than the worker grace plus resource cleanup. Preserve both
+work and cleanup errors; the shipped process examples do so without installing process handlers in
+library code. Set loaders/environment in the application worker entry as its existing tooling needs.
+
 ## Observe and escalate
 
 onEvent is best-effort local observation. Observer throws/rejections warn without affecting outcomes;

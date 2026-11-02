@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.0
+
+- Extend cancel(id) to persist running-job cancellation across processes. Workers use the existing
+  handler signal and heartbeat; completion, rollback, retry suppression and recovery remain fenced.
+  Expose cancelRequestedAt and cancelled attempt history/events. Pending cancellation stays immediate.
+- Require storage version 3. Copy jobsCancellationUpgrade from /migrations into a new application
+  migration after stopping old producers/workers. Version 1 first needs the existing jobsUpgrade.
+  Saved installation/upgrade SQL remains unchanged; no automatic upgrade command is added.
+- Document cancellation races, detection latency and the distinction between queue state and external
+  effects. Reuse one host shutdown signal; detailed driver contracts stay with pgclear.
+
 ## 0.2.2
 
 - Simplify the README worker to a plain runJobs call. Keep optional process-signal wiring in hosting
