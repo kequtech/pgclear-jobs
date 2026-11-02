@@ -93,12 +93,17 @@ releases its successor in the same transaction; rollback restores the relationsh
 wakeups exclude blocked records. This guarantees trailing work, not one execution per request.
 Concurrent requests follow database serialization order; application force/timing rules are not merged.
 
-Schedules are durable producers of ordinary jobs. Each maintenance pass locks up to 50 due schedules
+By default, schedules are durable producers of ordinary jobs. Each maintenance pass locks up to 50 due schedules
 for selected definitions, inserts work, and advances cursors atomically. One catch-up occurrence is
 submitted after downtime; skipped ticks are not replayed. Occurrence uniqueness prevents duplicate
 original submissions, and a unique partial index permits one pending/running job per schedule.
 This arbitration includes manual retries. A conflicting retry raises `JobStateError`; a conflicting
 scheduler insertion is skipped. Removing a schedule leaves its jobs intact.
+
+With `requestKey`, a tick instead invokes the same keyed request function, atomically with cursor
+advancement. It preserves retry heads and due times, and coalesces a successor. Shared jobs have no
+exclusive schedule ID/date; `lastJobId` on each contributing schedule records the affected job.
+See [recurring schedules](api.md#recurring-schedules) for edits, retries and metadata.
 
 Cron/DST calculation follows cron-parser. No matching runner means no schedule advancement. Register
 unchanged schedules safely at startup; changed cron/zone starts from a new future cursor.
@@ -163,7 +168,9 @@ pool can cancel an attempt even when the application process remains healthy.
 
 Setup explicitly installs one reserved `pgclear_jobs` schema. Workers only check its compatibility;
 producers never perform DDL. A deliberate down migration removes the namespace and its dependants.
-An explicit down/up reset may lose queued jobs and history. See [schema setup](migrations.md).
+Existing version-1 storage upgrades through the explicit `jobsUpgrade` SQL in a new app migration,
+with old producers/workers stopped. Setup and workers never apply it automatically. A down/up reset
+loses queued work and is not an upgrade procedure. See [storage upgrades](migrations.md).
 
 The test suite covers real PostgreSQL rollback, competing workers, process death, lock waits,
 follow-up promotion, schedule arbitration, retention, and shared-pool pressure. A test-only TCP relay

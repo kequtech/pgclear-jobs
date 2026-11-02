@@ -2,8 +2,8 @@ import type { Pool, TransactionOptions } from '@kequtech/pgclear';
 import { definitionFactory, workerFactory } from './definition.js';
 import type { JobDefinition } from './definition.js';
 import { JobRecords } from './records.js';
-import { runJobsWithIntegration } from './runner.js';
-import type { RunnerOptions } from './runner.js';
+import { runJobsWithIntegration, startJobsWithIntegration } from './runner.js';
+import type { RunnerOptions, RunnerHandle } from './runner.js';
 import type { Execute } from './storage.js';
 
 export type { Execute } from './storage.js';
@@ -23,6 +23,11 @@ export interface JobsApi<Database, Tx> {
   readonly defineJob: ReturnType<typeof definitionFactory<Tx>>;
   readonly defineWorker: ReturnType<typeof workerFactory<Tx>>;
   jobs(scope: Database | Tx): JobRecords;
+  startJobs(
+    database: Database,
+    definitions: readonly JobDefinition<unknown, Tx>[],
+    options?: RunnerOptions,
+  ): RunnerHandle;
   runJobs(
     database: Database,
     definitions: readonly JobDefinition<unknown, Tx>[],
@@ -38,6 +43,11 @@ export function createJobsIntegration<Database, Tx>(
     defineJob: definitionFactory<Tx>(),
     defineWorker: workerFactory<Tx>(),
     jobs: (scope: Database | Tx) => new JobRecords(integration.execute(scope)),
+    startJobs: (
+      database: Database,
+      definitions: readonly JobDefinition<unknown, Tx>[],
+      options: RunnerOptions = {},
+    ) => startJobsWithIntegration(database, definitions, options, integration),
     runJobs: (
       database: Database,
       definitions: readonly JobDefinition<unknown, Tx>[],

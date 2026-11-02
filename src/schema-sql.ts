@@ -1,4 +1,4 @@
-export const schemaVersion = 1;
+export const schemaVersion = 2;
 export const notificationChannel = 'pgclear_jobs_ready';
 export const migrationLockSql = 'SELECT pg_advisory_xact_lock(187032712, 1)';
 export const downSql = 'DROP SCHEMA IF EXISTS pgclear_jobs CASCADE';
@@ -61,7 +61,7 @@ export const upStatements: readonly string[] = [
   `CREATE TABLE pgclear_jobs.schedules (
     id uuid PRIMARY KEY, name text NOT NULL, key text NOT NULL DEFAULT '', payload jsonb NOT NULL,
     policy jsonb NOT NULL, cron text NOT NULL, time_zone text NOT NULL,
-    next_run_at timestamptz NOT NULL, last_job_id uuid, UNIQUE (name, key)
+    next_run_at timestamptz NOT NULL, last_job_id uuid, request_key text, UNIQUE (name, key)
   )`,
   'CREATE INDEX schedules_due ON pgclear_jobs.schedules (name, next_run_at, id)',
   // Promotion shares the terminal transition's transaction and parent-before-child lock order.

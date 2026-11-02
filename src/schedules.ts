@@ -10,12 +10,15 @@ export interface ScheduleOptions {
   readonly cron: string;
   readonly timeZone?: string;
   readonly key?: string;
+  /** Issue a coalesced request instead of an independent schedule occurrence. */
+  readonly requestKey?: string;
 }
 
 export interface Schedule<Payload = unknown> {
   readonly id: string;
   readonly name: string;
   readonly key: string;
+  readonly requestKey: string | null;
   readonly payload: Payload;
   readonly policy: ExecutionPolicy;
   readonly cron: string;
@@ -28,6 +31,7 @@ interface StoredSchedule {
   id: string;
   name: string;
   key: string;
+  request_key: string | null;
   payload: unknown;
   cron: string;
   time_zone: string;
@@ -67,6 +71,7 @@ function record<Payload>(row: StoredSchedule): Schedule<Payload> {
     id: row.id,
     name: row.name,
     key: row.key,
+    requestKey: row.request_key,
     payload: row.payload as Payload,
     policy: executionPolicy(row.policy),
     cron: row.cron,
@@ -82,20 +87,22 @@ export async function saveSchedule<Payload>(
   payload: NoInfer<Payload>,
   options: ScheduleOptions,
 ): Promise<Schedule<Payload>> {
-  validateOptions(options, ['cron', 'timeZone', 'key']);
+  validateOptions(options, ['cron', 'timeZone', 'key', 'requestKey']);
   // Validate before SQL, then calculate against the database clock rather than the producer's clock.
   previewSchedule(options, { count: 1 });
   const key = databaseText(options.key ?? '', 'Schedule key', 500);
+  const requestKey =
+    options.requestKey === undefined ? null : databaseText(options.requestKey, 'Request key', 500);
   const data = serializePayload(payload);
   const clock = await execute<{ now: string }>('SELECT to_jsonb(clock_timestamp()) AS now');
   const next = previewSchedule(options, { from: new Date(clock.rows[0]!.now), count: 1 })[0]!;
   const { rows } = await execute<{ record: StoredSchedule }>(
-    `INSERT INTO pgclear_jobs.schedules AS s (id, name, key, payload, policy, cron, time_zone, next_run_at)
-     VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8::timestamptz)
+    `INSERT INTO pgclear_jobs.schedules AS s (id, name, key, payload, policy, cron, time_zone, next_run_at, request_key)
+     VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, $8::timestamptz, $9)
      ON CONFLICT (name, key) DO UPDATE SET payload = excluded.payload, policy = excluded.policy,
        next_run_at = CASE WHEN (s.cron, s.time_zone) IS DISTINCT FROM (excluded.cron, excluded.time_zone)
          THEN excluded.next_run_at ELSE s.next_run_at END,
-       cron = excluded.cron, time_zone = excluded.time_zone
+       cron = excluded.cron, time_zone = excluded.time_zone, request_key = excluded.request_key
      RETURNING to_jsonb(s) AS record`,
     [
       randomUUID(),
@@ -106,6 +113,7 @@ export async function saveSchedule<Payload>(
       options.cron.trim().replace(/\s+/g, ' '),
       options.timeZone ?? 'UTC',
       next.toISOString(),
+      requestKey,
     ],
   );
   return record<Payload>(rows[0]!.record);
@@ -123,7 +131,7 @@ export async function listSchedules<Payload>(
   return rows.map(({ record: row }) => record<Payload>(row));
 }
 
-/** Lock schedules, enqueue ordinary jobs and advance cursors in the same bounded transaction. */
+/** Lock schedules, submit work and advance cursors in the same bounded transaction. */
 export async function advanceSchedules(
   pool: Pick<Pool, 'queryClassic' | 'transaction'>,
   names: readonly string[],
@@ -150,21 +158,33 @@ export async function advanceSchedules(
         const options = { cron: schedule.cron, timeZone: schedule.time_zone };
         const occurred = new Date(schedule.next_run_at);
         const next = previewSchedule(options, { from: clock, count: 1 })[0]!;
-        const inserted = await tx.queryClassic<{ id: string }>(
-          `INSERT INTO pgclear_jobs.jobs (id, name, payload, policy, schedule_id, scheduled_for)
+        const inserted =
+          schedule.request_key === null
+            ? await tx.queryClassic<{ id: string }>(
+                `INSERT INTO pgclear_jobs.jobs (id, name, payload, policy, schedule_id, scheduled_for)
            SELECT $1::uuid, $2, $3::jsonb, $4::jsonb, $5::uuid, $6::timestamptz
            WHERE NOT EXISTS (SELECT FROM pgclear_jobs.jobs
              WHERE schedule_id = $5::uuid AND state IN ('pending', 'running'))
            ON CONFLICT DO NOTHING RETURNING id`,
-          [
-            randomUUID(),
-            schedule.name,
-            JSON.stringify(schedule.payload),
-            JSON.stringify(executionPolicy(schedule.policy)),
-            schedule.id,
-            occurred.toISOString(),
-          ],
-        );
+                [
+                  randomUUID(),
+                  schedule.name,
+                  JSON.stringify(schedule.payload),
+                  JSON.stringify(executionPolicy(schedule.policy)),
+                  schedule.id,
+                  occurred.toISOString(),
+                ],
+              )
+            : await tx.queryClassic<{ id: string }>(
+                `SELECT (pgclear_jobs.request_job($1::uuid, $2, $3::jsonb, $4, NULL, 0, $5::jsonb, false)).id AS id`,
+                [
+                  randomUUID(),
+                  schedule.name,
+                  JSON.stringify(schedule.payload),
+                  schedule.request_key,
+                  JSON.stringify(executionPolicy(schedule.policy)),
+                ],
+              );
         const jobId = inserted.rows[0]?.id ?? null;
         if (jobId) created++;
         await tx.queryClassic(

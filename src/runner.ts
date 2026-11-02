@@ -39,6 +39,38 @@ export interface RunnerOptions extends RunnerHooks {
   readonly retentionMs?: number | false;
 }
 
+export interface RunnerHandle {
+  /** Startup validation and onReady completed; not an ongoing health check. */
+  readonly ready: Promise<void>;
+  /** Full runner lifetime, including cleanup. The caller still supervises failures. */
+  readonly done: Promise<void>;
+}
+
+export function startJobs(
+  pool: Pool,
+  definitions: readonly JobDefinition<unknown>[],
+  options: RunnerOptions = {},
+): RunnerHandle {
+  return startJobsWithIntegration(pool, definitions, options, pgclearIntegration);
+}
+
+export function startJobsWithIntegration<Database, Tx>(
+  database: Database,
+  definitions: readonly JobDefinition<unknown, Tx>[],
+  options: RunnerOptions,
+  integration: JobsIntegration<Database, Tx>,
+): RunnerHandle {
+  const ready = Promise.withResolvers<void>();
+  const done = runJobsWithIntegration(database, definitions, options, integration, ready.resolve);
+  // Both promises are observed immediately, even while the host is awaiting readiness.
+  void ready.promise.catch(() => {});
+  void done.then(
+    () => ready.reject(new DOMException('Worker stopped before readiness.', 'AbortError')),
+    ready.reject,
+  );
+  return { ready: ready.promise, done };
+}
+
 function notificationWarning(error: unknown): void {
   process.emitWarning('Job notifications are unavailable; continuing with polling.', {
     code: 'PGCLEAR_JOBS_NOTIFICATIONS_UNAVAILABLE',
@@ -61,6 +93,7 @@ export async function runJobsWithIntegration<Database, Tx>(
   definitions: readonly JobDefinition<unknown, Tx>[],
   options: RunnerOptions,
   integration: JobsIntegration<Database, Tx>,
+  started?: () => void,
 ): Promise<void> {
   validateOptions(options, [
     'signal',
@@ -195,6 +228,7 @@ export async function runJobsWithIntegration<Database, Tx>(
       else await settleOrAbort(ready, stop.signal);
     }
     if (stop.signal.aborted) return;
+    started?.();
     listening = startListener().catch(fail);
     maintenance = (async () => {
       let nextCleanup = 0;

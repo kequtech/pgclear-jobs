@@ -20,7 +20,8 @@ without copying queue logic.
 
 One reserved `pgclear_jobs` schema stores jobs, attempts, schedules, and a compatibility marker.
 Installation/removal is explicit. One concrete up/down SQL pair serves both the standalone command
-and application-owned migration files. There is no incremental migration engine.
+and application-owned migration files. Storage changes ship separate explicit upgrade SQL; there is
+no automatic incremental migration engine.
 
 ## Execution path
 
@@ -39,8 +40,8 @@ execution and [hook semantics](api.md#observation-and-error-policy); the runner 
 maintenance, notifications, and shutdown.
 
 A terminal trigger promotes keyed successors atomically. A request function handles head/successor
-contention within the caller's SQL scope. Recurring schedules submit ordinary jobs in bounded
-transactions. Automatic cleanup uses a completed/cancelled-only index and bounded batches.
+contention within the caller's SQL scope. Recurring schedules submit ordinary jobs or keyed requests
+in bounded transactions. Automatic cleanup uses a completed/cancelled-only index and bounded batches.
 
 ## Source layout
 

@@ -4,7 +4,7 @@ import { setImmediate as nextTurn } from 'node:timers/promises';
 import { createPool } from '@kequtech/pgclear';
 import type { Pool, Transaction } from '@kequtech/pgclear';
 import { createJobsIntegration } from '../../src/integration.js';
-import { defineJob, jobs, runJobs } from '../../src/index.js';
+import { defineJob, jobs, runJobs, startJobs } from '../../src/index.js';
 import { definition, pool, until, url } from '../helpers/database.js';
 
 const integrated = createJobsIntegration<Pool, Transaction>({
@@ -12,6 +12,53 @@ const integrated = createJobsIntegration<Pool, Transaction>({
   execute: (scope) => (sql, values) => scope.queryClassic(sql, values),
   transaction: (pool, work, options) => pool.transaction(work, options),
 });
+
+for (const start of [startJobs, integrated.startJobs]) {
+  test('handles preserve callback failures, cancellation and later lifetime failures', async () => {
+    const failure = new Error('startup callback');
+    const rejected = start(pool, [definition()], {
+      onReady() {
+        throw failure;
+      },
+    });
+    await assert.rejects(rejected.ready, (e) => e === failure);
+    await assert.rejects(rejected.done, (e) => e === failure);
+
+    const stop = new AbortController();
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const cancelled = start(pool, [definition()], {
+      signal: stop.signal,
+      onReady() {
+        entered.resolve();
+        return release.promise;
+      },
+    });
+    await entered.promise;
+    stop.abort();
+    await assert.rejects(cancelled.ready, { name: 'AbortError' });
+    await cancelled.done;
+    release.reject(new Error('late callback'));
+    await nextTurn();
+
+    const fatal = new Error('independent handler failure');
+    const def = defineJob({
+      name: definition().name,
+      handler(_payload: number) {
+        throw fatal;
+      },
+    });
+    await jobs(pool).send(def, 1);
+    const later = start(pool, [def], {
+      onHandlerError() {
+        return 'stop';
+      },
+    });
+    await later.ready;
+    await assert.rejects(later.done, (e) => e === fatal);
+    await later.ready;
+  });
+}
 
 for (const [name, start] of Object.entries({ native: runJobs, integrated: integrated.runJobs })) {
   test(`${name} ready is called once after validation and awaited before dispatch`, async () => {

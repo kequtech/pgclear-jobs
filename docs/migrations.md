@@ -1,52 +1,89 @@
-# Schema setup
+# Storage setup, upgrades and grants
 
-After installing `@kequtech/pgclear-jobs` and its pgclear peer, set `DATABASE_URL` in the environment
-or `.env` and run:
+Jobs owns one fixed `pgclear_jobs` schema per database. Imports and worker startup never install
+or upgrade it. Applications sharing a database must agree on storage ownership; job names are not
+an authorization boundary.
+
+## Install new storage
 
 ```sh
 npx pgclear-jobs migrate
 ```
 
-For an application npm script, use `"jobs:migrate": "pgclear-jobs migrate"`, then
-`npm run jobs:migrate`. Within this library's checkout the script builds the command first.
-The command also accepts explicit `up`. `pgclear-jobs --help` needs no database.
+The command reads `DATABASE_URL` from the environment or `.env`. Explicit `up` is also accepted;
+`--help` needs no credentials. `migrateJobs(pool)` and `installJobs(pool)` are programmatic equivalents.
+Installation uses one transaction and an advisory lock. Repeating it validates the current version
+and preserves data; an incompatible namespace rejects instead of being reset.
 
-There is one schema definition. Repeating installation checks compatibility and preserves existing
-work. Installation is atomic and serialized by an advisory transaction lock. Neither importing the
-package nor running a worker installs storage.
+With an existing migration runner, save the concrete strings instead:
 
-## Remove storage
+```ts
+import { jobsMigration } from '@kequtech/pgclear-jobs/migrations';
+// Write jobsMigration.up/down into a new application migration pair.
+```
 
-Stop producers and workers, then intentionally remove the namespace:
+These contain no outer BEGIN/COMMIT; the runner supplies the transaction. Commit the SQL and never
+make historical migrations import a live installer or the newest package. Tenon's `jobs setup`
+creates this installation pair offline and recognizes an existing pair without rewriting it.
+
+## Upgrade storage version 1 to 2
+
+Jobs 0.2.1 uses storage version 2, adding nullable `schedules.request_key`. Existing jobs, attempts,
+retry timing, claims, successors and ordinary schedules retain their state. New installations use
+`jobsMigration`; existing installations use a **new** migration containing `jobsUpgrade.up`:
+
+```ts
+import { jobsUpgrade } from '@kequtech/pgclear-jobs/migrations';
+// { from: 1, to: 2, up: string, down: string }
+```
+
+1. Stop producers and schedulers/workers using the old package. Await normal worker cleanup; do
+   not reset running records or discard outstanding work.
+2. Save/review the exported upgrade SQL as a new immutable application migration. Apply it in a
+   transaction as the storage owner. It checks the source version and takes the installation lock.
+3. Update all producers/workers to the new package, verify grants, then restart them. Old workers
+   reject version 2, and new workers reject version 1. Mixed-version operation is unsupported.
+
+Neither `migrate up` nor worker startup applies this upgrade. A failed upgrade transaction leaves
+version 1 and its data intact. Repeated upgrade SQL rejects the wrong source version; the application's
+migration history owns exactly-once application. The CLI has no automatic upgrade engine.
+
+For rollback, stop producers/workers again and remove or convert every keyed schedule to an ordinary
+schedule. `jobsUpgrade.down` refuses while request keys remain, then removes only the new column and
+restores version 1. Shared jobs remain ordinary keyed requests; the old package can execute them.
+Reversal does not undo jobs or business effects produced while version 2 was active.
+
+## Runtime grants
+
+Use a storage owner for DDL and a separate runtime role. The shipped
+[runtime grants example](../examples/runtime-grants.sql) assumes `jobs_runtime` already exists:
+
+```sql
+GRANT USAGE ON SCHEMA pgclear_jobs TO jobs_runtime;
+GRANT SELECT ON pgclear_jobs.schema_version TO jobs_runtime;
+GRANT SELECT, INSERT, UPDATE, DELETE ON pgclear_jobs.jobs, pgclear_jobs.attempts,
+  pgclear_jobs.schedules TO jobs_runtime;
+REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA pgclear_jobs FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION pgclear_jobs.request_job(uuid, text, jsonb, text,
+  timestamptz, double precision, jsonb, boolean) TO jobs_runtime;
+```
+
+Triggers execute without a direct EXECUTE grant on their functions. The runtime role does not need
+schema CREATE, ownership, or DDL rights. This recipe covers submissions, scheduling, execution,
+retry, inspection and pruning; it is not per-definition isolation. Recheck grants after storage DDL.
+A producer-only role can omit attempts privileges and DELETE, retaining jobs SELECT/INSERT/UPDATE,
+request-function execution, and schedule privileges only if it registers schedules. The application
+still owns database login, membership and business-table grants.
+
+## Remove storage intentionally
 
 ```sh
 npx pgclear-jobs migrate down
 ```
 
-Down executes `DROP SCHEMA IF EXISTS pgclear_jobs CASCADE`. It removes jobs, attempts, schedules,
-history, and objects depending on them. Repeated down is safe. A severe breaking schema change may
-use this explicit down/up reset, with loss of queued jobs accepted by the developer. There are no
-intermediate versions or automatic destructive upgrades. Configuration changes never remove storage.
+Stop producers/workers first. Down runs `DROP SCHEMA IF EXISTS pgclear_jobs CASCADE`, removing jobs,
+attempts, schedules, history and dependent objects. It is not an upgrade procedure. Programmatically,
+use `migrateJobs(pool, 'down')`. Repeated removal is safe; data loss is intentional.
 
-Programmatic equivalents are `migrateJobs(pool)` and `migrateJobs(pool, 'down')` from the root module.
-`installJobs(pool)` is also a convenience for installation. Each operation uses one transaction.
-Existing incompatible/unversioned namespaces are rejected by up; down can remove them intentionally.
-
-## Application migration files
-
-```ts
-import { jobsMigration } from '@kequtech/pgclear-jobs/migrations';
-
-// Save jobsMigration.up and jobsMigration.down as application migration files.
-```
-
-These strings use the same canonical statements and advisory lock as standalone setup. They contain
-no outer `BEGIN`/`COMMIT`; the application's migration runner supplies the transaction. Raw up SQL
-is an installation migration, applied once by that runner, rather than a repeatable setup command.
-
-Commit concrete SQL files. Do not make a historical migration import the newest package or call a
-live installer: dependency updates must not change saved migration behavior. Tenon can copy/apply
-this pair without understanding Jobs tables or execution internals.
-
-Workers check a small internal compatibility marker before starting. They never migrate implicitly.
-After an uncertain commit, inspect database state; an error alone does not prove rollback.
+A lost commit response does not prove rollback. Inspect authoritative state before retrying any
+migration or compensating external effects.

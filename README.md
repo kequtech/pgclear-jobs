@@ -62,8 +62,14 @@ by default. Observe its promise: runner infrastructure and managed-transaction f
 for application supervision.
 The runner leaves the application pool open.
 
-HTTP hosts can use `onReady` to observe startup separately from the supervised worker lifetime.
+HTTP hosts can use `startJobs(pool, definitions, options)` for `{ ready, done }` promises, or retain
+`runJobs` with its `onReady` callback. Both use the same runner and leave pool ownership unchanged.
 See [startup readiness](docs/api.md#startup-readiness).
+
+Existing Jobs 0.2.0 installations need the explicit version-1-to-2 upgrade SQL before running
+Jobs 0.2.1. New installation SQL is separate; never reset queued work to upgrade. See
+[storage upgrades and grants](docs/migrations.md). Bulk status reads can use `jobs(pool).getMany(ids)`
+for up to 1000 IDs in one statement, in requested order with duplicates/missing records omitted.
 
 ## Share a producer contract and bind workers separately
 
@@ -165,7 +171,10 @@ await jobs(pool).schedule(
 
 Registering an unchanged schedule preserves its cursor. Schedules submit one catch-up occurrence
 after downtime and suppress new occurrences while previous work remains outstanding. A runner
-selecting the definition must be running to advance its schedules.
+selecting the definition must be running to advance its schedules. Set `requestKey` separately from
+the schedule identity `key` when scheduled/manual/startup triggers should share a keyed request.
+Ticks preserve existing timing and retries; each schedule records the affected shared job's ID.
+See [schedule semantics](docs/api.md#recurring-schedules).
 
 Definitions default to three total attempts, exponential backoff with jitter, and a five-minute
 execution deadline. Set policy on `defineJob`; each submission snapshots it. Use `JobError` to mark

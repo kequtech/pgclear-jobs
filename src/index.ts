@@ -26,8 +26,8 @@ export { installJobs, migrateJobs } from './schema.js';
 export type { Job, JobState } from './storage.js';
 export { JobError, JobNotFoundError, JobStateError } from './errors.js';
 export type { JobErrorOptions } from './errors.js';
-export { runJobs } from './runner.js';
-export type { RunnerOptions } from './runner.js';
+export { runJobs, startJobs } from './runner.js';
+export type { RunnerOptions, RunnerHandle } from './runner.js';
 export { previewSchedule } from './schedules.js';
 export type { Schedule, ScheduleOptions } from './schedules.js';
 

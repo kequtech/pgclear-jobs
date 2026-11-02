@@ -157,18 +157,23 @@ A `Job<Payload>` exposes:
 `retryOf`, `blockedBy`, and `lastJobId` identifiers are not substitutes for retaining related records.
 A referenced terminal record can later be removed.
 
-| Method                                          | Result                                                           |
-| ----------------------------------------------- | ---------------------------------------------------------------- |
-| `get(id)`                                       | `Job<unknown>` or `null`                                         |
-| `find(def, { key?, states?, limit?, after? }?)` | Jobs in ascending creation-time/UUID order                       |
-| `stats(def)`                                    | Counts by state, plus `ready`, `delayed`, `blocked`, and `total` |
-| `attempts(id, { limit? }?)`                     | Latest attempts first; missing jobs return `[]`                  |
-| `update(def, id, payload)`                      | Replace the payload of a pending job of that definition          |
-| `reschedule(id, runAt)`                         | Set a pending job's execution time                               |
-| `cancel(id)`                                    | Cancel pending work and release any successor                    |
-| `retry(id)`                                     | Create a fresh job from a failed record                          |
-| `remove(id)`                                    | Delete a terminal record; `false` if absent                      |
-| `prune(def, { before, states?, limit? })`       | Delete a bounded terminal-history batch                          |
+| Method                                          | Result                                                                 |
+| ----------------------------------------------- | ---------------------------------------------------------------------- |
+| `getMany(ids)`                                  | Found records once each, in first-requested order; missing IDs omitted |
+| `get(id)`                                       | `Job<unknown>` or `null`                                               |
+| `find(def, { key?, states?, limit?, after? }?)` | Jobs in ascending creation-time/UUID order                             |
+| `stats(def)`                                    | Counts by state, plus `ready`, `delayed`, `blocked`, and `total`       |
+| `attempts(id, { limit? }?)`                     | Latest attempts first; missing jobs return `[]`                        |
+| `update(def, id, payload)`                      | Replace the payload of a pending job of that definition                |
+| `reschedule(id, runAt)`                         | Set a pending job's execution time                                     |
+| `cancel(id)`                                    | Cancel pending work and release any successor                          |
+| `retry(id)`                                     | Create a fresh job from a failed record                                |
+| `remove(id)`                                    | Delete a terminal record; `false` if absent                            |
+| `prune(def, { before, states?, limit? })`       | Delete a bounded terminal-history batch                                |
+
+`getMany` accepts at most 1000 UUIDs in one statement; it normalizes duplicate IDs and returns
+`Job<unknown>` records. Empty input returns `[]` without SQL; invalid IDs and oversized batches
+reject before SQL. It uses the caller's transaction, as `get` does.
 
 Lists default to 100 and permit 1–1000. Continue `find` with the last job's `cursor` and the same
 filters. Removed cursor rows remain usable. Pagination is live, not a frozen snapshot. `states: []`
@@ -191,7 +196,7 @@ also deletes its attempts. All operations use the caller's scope.
 
 ## Recurring schedules
 
-`schedule(definition, payload, { cron, timeZone?, key? })` returns a `Schedule<Payload>`. Cron must be
+`schedule(definition, payload, { cron, timeZone?, key?, requestKey? })` returns a `Schedule<Payload>`. Cron must be
 a deterministic five-field expression; randomized `H` expressions are rejected. Time zone defaults
 to `UTC`; keys default to empty and have at most 500 characters.
 
@@ -200,9 +205,22 @@ occurrence. Payload/policy updates apply to future jobs. After downtime, submit 
 and advance into the future. Suppress new occurrences while work from that schedule is pending or
 running, including automatic/manual retries. Different schedules can run independently.
 
-`Schedule` contains `id`, `name`, `key`, `payload`, `policy`, `cron`, `timeZone`, `nextRunAt`, and
+`Schedule` contains `id`, `name`, `key`, nullable `requestKey`, `payload`, `policy`, `cron`, `timeZone`, `nextRunAt`, and
 nullable `lastJobId`. `schedules(def, { limit? }?)` lists by key, default 100, maximum 1000.
 `unschedule(def, key?)` removes the producer and leaves its jobs intact.
+
+Set `requestKey` to make each due tick issue a coalesced request, using the same definition/key
+as manual or startup requests. This is separate from the schedule identity `key`. It replaces an
+unstarted payload or creates/updates one successor behind a started head and all its retries.
+Omitted timing preserves existing due times, so ticks never postpone a pending head or successor.
+New requests are immediately eligible. Missed ticks coalesce to one submission before advancing
+the cursor into the future. Payloads replace rather than merge; saved job policy stays unchanged.
+
+A shared job has no exclusive schedule owner: its `scheduleId` and `scheduledFor` remain null.
+The schedule's `lastJobId` records the affected shared job, including an existing one. Two schedules
+may point at the same job. Unscheduling leaves jobs intact; manual retry follows normal key
+arbitration. Changing `requestKey` changes future ticks without cancelling previous work.
+Omitting it restores independent occurrences; changing only key/payload/policy keeps the due cursor.
 
 `previewSchedule({ cron, timeZone? }, { from?, count? }?)` returns future Dates strictly after `from`
 without a database. Defaults are now and 5 occurrences; maximum count is 100. Calendar and DST
@@ -313,20 +331,18 @@ Readiness means compatible storage was checked and dispatch is about to start. I
 notification connectivity, every future SQL permission, or ongoing health. Continue observing the
 worker promise and route later failures to application supervision.
 
-For a host with separate startup and lifetime handling:
+`startJobs(pool, definitions, options?)` returns a `RunnerHandle` with `ready` and `done`
+promises. It uses the same runner/options; `runJobs` remains available. `ready` resolves after
+validation and successful completion of `onReady`, before dispatch. Startup errors reject both
+promises with the original error. Shutdown before readiness rejects `ready` with an `AbortError`
+and normally resolves `done`; a later runner failure rejects `done` without changing `ready`.
+Both promises have immediate rejection observation, but the application must supervise `done`.
+The handle installs no signal handlers and never closes the pool.
 
 ```ts
-const ready = Promise.withResolvers<void>();
-const running = runJobs(pool, definitions, { signal, onReady: () => ready.resolve() });
-
-// superviseWorker is application code that observes lifetime errors and requests process shutdown.
-superviseWorker(running);
-await Promise.race([
-  ready.promise,
-  running.then(() => {
-    throw new Error('Worker stopped before startup completed.');
-  }),
-]);
+const worker = startJobs(pool, definitions, { signal });
+superviseWorker(worker.done); // Application-owned failure/shutdown policy.
+await worker.ready;
 // Start accepting HTTP traffic here.
 ```
 
@@ -341,7 +357,8 @@ forwards this same option; it needs no separate readiness implementation.
 Both use `DATABASE_URL` from the environment or `.env`. Programmatic equivalents are
 `migrateJobs(pool)` and `migrateJobs(pool, 'down')`; `installJobs(pool)` also installs.
 
-There is one schema, with no incremental history or version targeting. Installation is atomic,
+Storage version 2 adds scheduled request keys. There is no automatic upgrade history or version targeting. Installation is atomic,
 serialized, and repeatable. A worker checks compatibility but never applies DDL.
 `jobsMigration.up/down` from `/migrations` are the same concrete SQL for application migration files.
-See [schema setup](migrations.md) for removal and transaction ownership.
+`jobsUpgrade` exports explicit version-1-to-2 SQL. See [schema setup](migrations.md) for upgrades,
+grants, removal and transaction ownership.

@@ -1,6 +1,17 @@
 # Changelog
 
-## 0.2.0 — Unreleased
+## 0.2.1
+
+- Add bounded `getMany(ids)` lookups and optional `startJobs`/integration handles with `ready` and
+  `done` promises, preserving runner and pool ownership.
+- Add schedule `requestKey` so recurring, manual and startup triggers share existing keyed request
+  semantics. Shared jobs have no exclusive schedule occurrence metadata.
+- Storage version 2 adds the nullable schedule request key. Existing installations require the
+  explicit `jobsUpgrade` SQL from `/migrations`; stop old producers/workers first. Installation and
+  Tenon's setup still never upgrade or rewrite saved application migrations automatically.
+- Ship a tested runtime-role grants example and reject downgrades that would discard keyed schedules.
+
+## 0.2.0
 
 - Separate handler-free producer contracts from worker bindings with `JobSpec` and `defineWorker`;
   preserve inline definitions and infer native/integrated transaction scopes.

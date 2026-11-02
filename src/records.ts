@@ -183,6 +183,20 @@ export class JobRecords {
     return result.rows[0] ? jobRecord(result.rows[0].record) : null;
   }
 
+  /** Found records once each in first-requested order; missing IDs are omitted. */
+  async getMany(ids: readonly string[]): Promise<readonly Job[]> {
+    integer(ids.length, 'batch size', 0, 1000);
+    const selected = [...new Set(Array.from(ids, uuid))];
+    if (!selected.length) return [];
+    const { rows } = await this.execute<{ record: StoredJob }>(
+      `SELECT to_jsonb(j) AS record FROM jsonb_array_elements_text($1::jsonb)
+       WITH ORDINALITY AS requested(id, position)
+       JOIN pgclear_jobs.jobs j ON j.id = requested.id::uuid ORDER BY requested.position`,
+      [JSON.stringify(selected)],
+    );
+    return rows.map(({ record }) => jobRecord(record));
+  }
+
   async find<Payload>(
     definition: JobSpec<Payload>,
     options: FindOptions = {},

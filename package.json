@@ -1,6 +1,6 @@
 {
   "name": "@kequtech/pgclear-jobs",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Durable PostgreSQL jobs with typed definitions and explicit database scopes",
   "type": "module",
   "license": "ISC",
@@ -42,6 +42,7 @@
     "todo.md",
     "CHANGELOG.md",
     "examples/*.ts",
+    "examples/*.sql",
     "examples/README.md"
   ],
   "scripts": {
