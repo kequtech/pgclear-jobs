@@ -36,7 +36,7 @@ exceptions from independently opened application transactions remain handler fai
 
 Handler settlement and transaction settlement are tracked separately: a cancelled driver scope can
 roll back while uncooperative JavaScript continues and retains its local slot. `attempt.ts` owns
-execution and [hook semantics](api.md#observation-and-error-policy); the runner owns dispatch,
+execution and [hook semantics](docs/reference.md#observation-and-error-policy); the runner owns dispatch,
 maintenance, notifications, and shutdown.
 
 A terminal trigger promotes keyed successors atomically. A request function handles head/successor
@@ -57,6 +57,5 @@ in bounded transactions. Automatic cleanup uses a completed/cancelled-only index
 | `schema-sql.ts`, `schema.ts`, `migrations.ts`, `cli.ts` | One schema and explicit setup/removal                                                 |
 | `integration.ts`, `pgclear.ts`                          | Query/transaction bindings and the native binding                                     |
 
-The [reliability contract](storage-and-reliability.md) explains the failure boundaries. The
-[integration guide](integration.md) defines the narrow query-library contract. Tenon integration ownership and
-acceptance checks are described in the [integration responsibilities](implementation-plan.md).
+The [reliability contract](docs/reliability.md) explains failure boundaries. The
+[integration guide](docs/integration.md) defines the query-library contract and its acceptance checks.

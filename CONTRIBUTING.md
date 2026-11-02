@@ -11,7 +11,9 @@ npm run check
 
 `PGCLEAR_JOBS_TEST_DATABASE_URL` must identify a database ending in `_test`. Integration tests
 intentionally remove/reinstall the `pgclear_jobs` schema; use disposable Jobs data. Other application
-schemas are left alone. CI runs PostgreSQL 16 and 18. A local pass covers only the local server.
+schemas are left alone. CI runs PostgreSQL 16 and 18. A local pass covers only the local server. Integration tests include a real Next.js fixture: its
+Next/React dependencies are installed in a temporary consumer with packed Jobs and pgclear artifacts,
+without Tenon. The fixture role needs CREATEDB for its isolated storage.
 
 ## Checks
 
@@ -63,6 +65,17 @@ See [npm publish](https://docs.npmjs.com/cli/v11/commands/npm-publish/). Documen
 compatibility changes, and keep saved application migrations immutable.
 
 Validate Tenon's query guards, configuration, migration generation, and lifecycle when changing the
-integration; follow the [integration responsibilities](implementation-plan.md). Application checks should
+integration; follow the [integration responsibilities](docs/integration.md). Application checks should
 exercise idempotency, cancellation, supervision, pool sizing, and rollout with retained, delayed,
 and retrying work.
+
+## Documentation and test ownership
+
+README links five consumer guides: reference, storage, reliability, hosting and integration. They and
+examples ship in the package. This guide, ARCHITECTURE.md and notes stay repository-only. Check
+packed Markdown file/anchor targets and example imports when reorganizing documentation.
+
+Keep native/custom-scope queue semantics, schedules, migration/grant SQL, worker lifecycle and process
+hosting tests here. pgclear tests transport and native resource recovery; a query library tests its
+own guards, observations and facade expiry. Avoid repeating a lower library's full contract suite
+when an integration test can target the boundary.

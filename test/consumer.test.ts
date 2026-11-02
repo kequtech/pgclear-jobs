@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import { checkDocumentation } from './helpers/documentation.js';
 
 test('packed core, migration SQL and integration types work with the required pgclear peer only', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'pgclear-jobs-consumer-'));
@@ -50,6 +51,12 @@ test('packed core, migration SQL and integration types work with the required pg
     await assert.rejects(
       readFile(join(directory, 'node_modules/@kequtech/tenon-orm/package.json')),
     );
+    await checkDocumentation(join(directory, 'node_modules/@kequtech/pgclear-jobs'));
+    for (const path of ['ARCHITECTURE.md', 'CONTRIBUTING.md', 'notes', 'todo.md']) {
+      await assert.rejects(access(join(directory, 'node_modules/@kequtech/pgclear-jobs', path)), {
+        code: 'ENOENT',
+      });
+    }
     await writeFile(
       join(directory, 'consumer.mjs'),
       `

@@ -23,8 +23,8 @@ import { jobsMigration } from '@kequtech/pgclear-jobs/migrations';
 ```
 
 These contain no outer BEGIN/COMMIT; the runner supplies the transaction. Commit the SQL and never
-make historical migrations import a live installer or the newest package. Tenon's `jobs setup`
-creates this installation pair offline and recognizes an existing pair without rewriting it.
+make historical migrations import a live installer or the newest package. A query-library CLI may copy
+this pair into its migration directory; ownership of saved SQL remains with the application.
 
 ## Upgrade storage version 1 to 2
 

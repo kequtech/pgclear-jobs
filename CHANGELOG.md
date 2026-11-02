@@ -2,6 +2,11 @@
 
 ## 0.2.1
 
+- Rewrite standalone documentation around reference, storage, reliability, hosting and integration.
+  Detailed queue contracts live here; maintainer plans/architecture stay outside the package.
+- Move the generic Next process-host example and its real framework tests here from Tenon. Its
+  worker uses only pgclear/Jobs, and the packed fixture explicitly has no Tenon dependency.
+
 - Add bounded `getMany(ids)` lookups and optional `startJobs`/integration handles with `ready` and
   `done` promises, preserving runner and pool ownership.
 - Add schedule `requestKey` so recurring, manual and startup triggers share existing keyed request

@@ -38,12 +38,12 @@
   "files": [
     "dist/**/*.js",
     "dist/**/*.d.ts",
-    "docs/*.md",
-    "todo.md",
     "CHANGELOG.md",
     "examples/*.ts",
     "examples/*.sql",
-    "examples/README.md"
+    "examples/README.md",
+    "docs/",
+    "examples/*.mjs"
   ],
   "scripts": {
     "jobs:migrate": "npm run build && node dist/cli.js migrate",
