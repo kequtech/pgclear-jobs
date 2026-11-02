@@ -1,0 +1,2121 @@
+{
+  "status": "passed",
+  "revision": "8c50ae294abaf1d70d8e43e4601455e0703f0fee",
+  "workingTreeDirty": false,
+  "versions": {
+    "jobs": "0.3.1",
+    "pgclear": "0.3.3"
+  },
+  "sourceSha256": "8b615723e72a9f44cdced60bba4a65ff3b4e15df29682792fae955f9d390a161",
+  "harnessSha256": "da550ceb27b1f7dd77a871d07a94a95ccef59dff779199eefee5e3464ea086ac",
+  "driverCodeSha256": "9d469f8054e20e18b66b1eae17feeb92015352ea7173c1764c87f0c93d4810fc",
+  "notes": [
+    "Current Jobs source compiled using the repository test build and its locked pgclear dependency. Each invocation runs both existing load profiles.",
+    "Two runners share one Node process, with two competing application loops. No other benchmark or test runs concurrently.",
+    "Each profile starts with 1500 bulk jobs and retained/expired history. Throughput includes that initial backlog and drain, not just producer time.",
+    "startDelayMs includes enqueue, intentional scheduling delay and retries where applicable; quiet queue kind 1 does not retry.",
+    "The slow-SQL profile changes both pool capacity and simulated SQL waits. It is not a controlled pool-size-only experiment.",
+    "Stress repeats three times; the lower-offer-rate run is a single diagnostic. Summary percentiles are medians of per-run percentiles, not pooled distributions.",
+    "Each run asserts all submitted jobs complete, each intended retry runs exactly twice, and no attempts expire or jobs fail. EXPLAIN timings are single observations."
+  ],
+  "runs": [
+    {
+      "label": "stress-1",
+      "recordedAt": "2026-11-02T16:18:40.490Z",
+      "node": "v24.4.1",
+      "postgres": "16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)",
+      "cpu": "AMD Ryzen Threadripper 3970X 32-Core Processor",
+      "availableCpus": 64,
+      "durationMs": 10000,
+      "intervalMs": 50,
+      "profiles": [
+        {
+          "profile": "balanced",
+          "queryPoolSize": 4,
+          "runners": 2,
+          "concurrencyPerRunner": 4,
+          "handlerDbMs": 0,
+          "applicationDbMs": 2,
+          "initialBacklog": 1500,
+          "retainedHistory": 20000,
+          "initialExpiredHistory": 3000,
+          "submitted": 3722,
+          "retries": 68,
+          "producingMs": 10005,
+          "totalMs": 15407,
+          "throughputPerSecond": 242,
+          "peakOutstanding": 1817,
+          "peakWaiting": 9,
+          "peakConnections": 4,
+          "enqueueMs": {
+            "p50": 14.99,
+            "p95": 27.12,
+            "p99": 29.56
+          },
+          "startDelayMs": [
+            {
+              "kind": 0,
+              "p50": 7538.21,
+              "p95": 10607.46,
+              "p99": 10790.75
+            },
+            {
+              "kind": 1,
+              "p50": 21.64,
+              "p95": 32.66,
+              "p99": 40.02
+            },
+            {
+              "kind": 2,
+              "p50": 28.73,
+              "p95": 55.24,
+              "p99": 64.07
+            },
+            {
+              "kind": 3,
+              "p50": 230.76,
+              "p95": 238.9,
+              "p99": 241.96
+            }
+          ],
+          "application": {
+            "operations": 1197,
+            "p95Ms": 12.56,
+            "p99Ms": 16.76
+          },
+          "eventLoopP99Ms": 21.09,
+          "expiredAttempts": 0,
+          "failedJobs": 0,
+          "remainingExpiredHistory": 0,
+          "plans": {
+            "claim": {
+              "executionMs": 0.881,
+              "nodes": [
+                {
+                  "type": "Result",
+                  "rows": 1,
+                  "buffers": 33
+                },
+                {
+                  "type": "Function Scan",
+                  "rows": 4,
+                  "buffers": 0
+                },
+                {
+                  "type": "Limit",
+                  "rows": 1,
+                  "buffers": 13
+                },
+                {
+                  "type": "Sort",
+                  "rows": 1,
+                  "buffers": 13
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 1,
+                  "buffers": 10
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 4,
+                  "buffers": 0
+                },
+                {
+                  "type": "Subquery Scan",
+                  "rows": 0,
+                  "buffers": 10
+                },
+                {
+                  "type": "Limit",
+                  "rows": 0,
+                  "buffers": 10
+                },
+                {
+                  "type": "LockRows",
+                  "rows": 0,
+                  "buffers": 10
+                },
+                {
+                  "type": "Index Scan",
+                  "index": "jobs_pending",
+                  "rows": 0,
+                  "buffers": 9
+                },
+                {
+                  "type": "ModifyTable",
+                  "rows": 1,
+                  "buffers": 33
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 1,
+                  "buffers": 16
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 1,
+                  "buffers": 13
+                },
+                {
+                  "type": "Index Scan",
+                  "index": "jobs_pkey",
+                  "rows": 1,
+                  "buffers": 3
+                },
+                {
+                  "type": "ModifyTable",
+                  "rows": 0,
+                  "buffers": 32
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 1,
+                  "buffers": 0
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 1,
+                  "buffers": 33
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 1,
+                  "buffers": 0
+                },
+                {
+                  "type": "Aggregate",
+                  "rows": 0,
+                  "buffers": 0
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 0,
+                  "buffers": 0
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 0,
+                  "buffers": 0
+                },
+                {
+                  "type": "Limit",
+                  "rows": 0,
+                  "buffers": 0
+                },
+                {
+                  "type": "Index Only Scan",
+                  "index": "jobs_pending",
+                  "rows": 0,
+                  "buffers": 0
+                }
+              ]
+            },
+            "cleanup": {
+              "executionMs": 1.185,
+              "nodes": [
+                {
+                  "type": "ModifyTable",
+                  "rows": 100,
+                  "buffers": 1040
+                },
+                {
+                  "type": "Limit",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "Sort",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 400,
+                  "buffers": 440
+                },
+                {
+                  "type": "Function Scan",
+                  "rows": 4,
+                  "buffers": 0
+                },
+                {
+                  "type": "Subquery Scan",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "Limit",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "LockRows",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "Index Scan",
+                  "index": "jobs_retention",
+                  "rows": 100,
+                  "buffers": 40
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 100,
+                  "buffers": 740
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "Index Scan",
+                  "index": "jobs_pkey",
+                  "rows": 1,
+                  "buffers": 300
+                }
+              ]
+            }
+          }
+        },
+        {
+          "profile": "contended",
+          "queryPoolSize": 2,
+          "runners": 2,
+          "concurrencyPerRunner": 4,
+          "handlerDbMs": 8,
+          "applicationDbMs": 12,
+          "initialBacklog": 1500,
+          "retainedHistory": 20000,
+          "initialExpiredHistory": 3000,
+          "submitted": 3722,
+          "retries": 68,
+          "producingMs": 10012,
+          "totalMs": 43741,
+          "throughputPerSecond": 85,
+          "peakOutstanding": 3052,
+          "peakWaiting": 14,
+          "peakConnections": 2,
+          "enqueueMs": {
+            "p50": 31.66,
+            "p95": 38.91,
+            "p99": 41.27
+          },
+          "startDelayMs": [
+            {
+              "kind": 0,
+              "p50": 26119.48,
+              "p95": 32981.36,
+              "p99": 33554.92
+            },
+            {
+              "kind": 1,
+              "p50": 803.47,
+              "p95": 1089.7,
+              "p99": 1122.29
+            },
+            {
+              "kind": 2,
+              "p50": 2200.94,
+              "p95": 4839.67,
+              "p99": 5131.63
+            },
+            {
+              "kind": 3,
+              "p50": 1032.61,
+              "p95": 1290.96,
+              "p99": 1315.92
+            }
+          ],
+          "application": {
+            "operations": 1687,
+            "p95Ms": 38.59,
+            "p99Ms": 44.75
+          },
+          "eventLoopP99Ms": 21.04,
+          "expiredAttempts": 0,
+          "failedJobs": 0,
+          "remainingExpiredHistory": 0,
+          "plans": {
+            "claim": {
+              "executionMs": 0.386,
+              "nodes": [
+                {
+                  "type": "Result",
+                  "rows": 1,
+                  "buffers": 27
+                },
+                {
+                  "type": "Function Scan",
+                  "rows": 4,
+                  "buffers": 0
+                },
+                {
+                  "type": "Limit",
+                  "rows": 1,
+                  "buffers": 10
+                },
+                {
+                  "type": "Sort",
+                  "rows": 1,
+                  "buffers": 10
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 1,
+                  "buffers": 10
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 4,
+                  "buffers": 0
+                },
+                {
+                  "type": "Subquery Scan",
+                  "rows": 0,
+                  "buffers": 10
+                },
+                {
+                  "type": "Limit",
+                  "rows": 0,
+                  "buffers": 10
+                },
+                {
+                  "type": "LockRows",
+                  "rows": 0,
+                  "buffers": 10
+                },
+                {
+                  "type": "Index Scan",
+                  "index": "jobs_pending",
+                  "rows": 0,
+                  "buffers": 9
+                },
+                {
+                  "type": "ModifyTable",
+                  "rows": 1,
+                  "buffers": 27
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 1,
+                  "buffers": 13
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 1,
+                  "buffers": 10
+                },
+                {
+                  "type": "Index Scan",
+                  "index": "jobs_pkey",
+                  "rows": 1,
+                  "buffers": 3
+                },
+                {
+                  "type": "ModifyTable",
+                  "rows": 0,
+                  "buffers": 6
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 1,
+                  "buffers": 0
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 1,
+                  "buffers": 27
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 1,
+                  "buffers": 0
+                },
+                {
+                  "type": "Aggregate",
+                  "rows": 0,
+                  "buffers": 0
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 0,
+                  "buffers": 0
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 0,
+                  "buffers": 0
+                },
+                {
+                  "type": "Limit",
+                  "rows": 0,
+                  "buffers": 0
+                },
+                {
+                  "type": "Index Only Scan",
+                  "index": "jobs_pending",
+                  "rows": 0,
+                  "buffers": 0
+                }
+              ]
+            },
+            "cleanup": {
+              "executionMs": 1.266,
+              "nodes": [
+                {
+                  "type": "ModifyTable",
+                  "rows": 100,
+                  "buffers": 1040
+                },
+                {
+                  "type": "Limit",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "Sort",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 400,
+                  "buffers": 440
+                },
+                {
+                  "type": "Function Scan",
+                  "rows": 4,
+                  "buffers": 0
+                },
+                {
+                  "type": "Subquery Scan",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "Limit",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "LockRows",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "Index Scan",
+                  "index": "jobs_retention",
+                  "rows": 100,
+                  "buffers": 40
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 100,
+                  "buffers": 740
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "Index Scan",
+                  "index": "jobs_pkey",
+                  "rows": 1,
+                  "buffers": 300
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "label": "stress-2",
+      "recordedAt": "2026-11-02T16:19:39.116Z",
+      "node": "v24.4.1",
+      "postgres": "16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)",
+      "cpu": "AMD Ryzen Threadripper 3970X 32-Core Processor",
+      "availableCpus": 64,
+      "durationMs": 10000,
+      "intervalMs": 50,
+      "profiles": [
+        {
+          "profile": "balanced",
+          "queryPoolSize": 4,
+          "runners": 2,
+          "concurrencyPerRunner": 4,
+          "handlerDbMs": 0,
+          "applicationDbMs": 2,
+          "initialBacklog": 1500,
+          "retainedHistory": 20000,
+          "initialExpiredHistory": 3000,
+          "submitted": 3722,
+          "retries": 68,
+          "producingMs": 10010,
+          "totalMs": 10768,
+          "throughputPerSecond": 346,
+          "peakOutstanding": 1511,
+          "peakWaiting": 8,
+          "peakConnections": 4,
+          "enqueueMs": {
+            "p50": 10.18,
+            "p95": 17.34,
+            "p99": 19.04
+          },
+          "startDelayMs": [
+            {
+              "kind": 0,
+              "p50": 3102.74,
+              "p95": 5240.45,
+              "p99": 5422.51
+            },
+            {
+              "kind": 1,
+              "p50": 12.58,
+              "p95": 16.8,
+              "p99": 19.83
+            },
+            {
+              "kind": 2,
+              "p50": 18.43,
+              "p95": 41.21,
+              "p99": 47.89
+            },
+            {
+              "kind": 3,
+              "p50": 218.18,
+              "p95": 224.06,
+              "p99": 225.18
+            }
+          ],
+          "application": {
+            "operations": 868,
+            "p95Ms": 7.52,
+            "p99Ms": 10.49
+          },
+          "eventLoopP99Ms": 21.2,
+          "expiredAttempts": 0,
+          "failedJobs": 0,
+          "remainingExpiredHistory": 0,
+          "plans": {
+            "claim": {
+              "executionMs": 0.581,
+              "nodes": [
+                {
+                  "type": "Result",
+                  "rows": 1,
+                  "buffers": 36
+                },
+                {
+                  "type": "Function Scan",
+                  "rows": 4,
+                  "buffers": 0
+                },
+                {
+                  "type": "Limit",
+                  "rows": 1,
+                  "buffers": 13
+                },
+                {
+                  "type": "Sort",
+                  "rows": 1,
+                  "buffers": 13
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 1,
+                  "buffers": 10
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 4,
+                  "buffers": 0
+                },
+                {
+                  "type": "Subquery Scan",
+                  "rows": 0,
+                  "buffers": 10
+                },
+                {
+                  "type": "Limit",
+                  "rows": 0,
+                  "buffers": 10
+                },
+                {
+                  "type": "LockRows",
+                  "rows": 0,
+                  "buffers": 10
+                },
+                {
+                  "type": "Index Scan",
+                  "index": "jobs_pending",
+                  "rows": 0,
+                  "buffers": 9
+                },
+                {
+                  "type": "ModifyTable",
+                  "rows": 1,
+                  "buffers": 36
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 1,
+                  "buffers": 17
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 1,
+                  "buffers": 13
+                },
+                {
+                  "type": "Index Scan",
+                  "index": "jobs_pkey",
+                  "rows": 1,
+                  "buffers": 4
+                },
+                {
+                  "type": "ModifyTable",
+                  "rows": 0,
+                  "buffers": 38
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 1,
+                  "buffers": 0
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 1,
+                  "buffers": 36
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 1,
+                  "buffers": 0
+                },
+                {
+                  "type": "Aggregate",
+                  "rows": 0,
+                  "buffers": 0
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 0,
+                  "buffers": 0
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 0,
+                  "buffers": 0
+                },
+                {
+                  "type": "Limit",
+                  "rows": 0,
+                  "buffers": 0
+                },
+                {
+                  "type": "Index Only Scan",
+                  "index": "jobs_pending",
+                  "rows": 0,
+                  "buffers": 0
+                }
+              ]
+            },
+            "cleanup": {
+              "executionMs": 1.506,
+              "nodes": [
+                {
+                  "type": "ModifyTable",
+                  "rows": 100,
+                  "buffers": 1144
+                },
+                {
+                  "type": "Limit",
+                  "rows": 100,
+                  "buffers": 444
+                },
+                {
+                  "type": "Sort",
+                  "rows": 100,
+                  "buffers": 444
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 400,
+                  "buffers": 444
+                },
+                {
+                  "type": "Function Scan",
+                  "rows": 4,
+                  "buffers": 0
+                },
+                {
+                  "type": "Subquery Scan",
+                  "rows": 100,
+                  "buffers": 444
+                },
+                {
+                  "type": "Limit",
+                  "rows": 100,
+                  "buffers": 444
+                },
+                {
+                  "type": "LockRows",
+                  "rows": 100,
+                  "buffers": 444
+                },
+                {
+                  "type": "Index Scan",
+                  "index": "jobs_retention",
+                  "rows": 100,
+                  "buffers": 44
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 100,
+                  "buffers": 844
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 100,
+                  "buffers": 444
+                },
+                {
+                  "type": "Index Scan",
+                  "index": "jobs_pkey",
+                  "rows": 1,
+                  "buffers": 400
+                }
+              ]
+            }
+          }
+        },
+        {
+          "profile": "contended",
+          "queryPoolSize": 2,
+          "runners": 2,
+          "concurrencyPerRunner": 4,
+          "handlerDbMs": 8,
+          "applicationDbMs": 12,
+          "initialBacklog": 1500,
+          "retainedHistory": 20000,
+          "initialExpiredHistory": 3000,
+          "submitted": 3722,
+          "retries": 68,
+          "producingMs": 10040,
+          "totalMs": 43082,
+          "throughputPerSecond": 86,
+          "peakOutstanding": 3035,
+          "peakWaiting": 14,
+          "peakConnections": 2,
+          "enqueueMs": {
+            "p50": 31.01,
+            "p95": 38.78,
+            "p99": 41.37
+          },
+          "startDelayMs": [
+            {
+              "kind": 0,
+              "p50": 25857.96,
+              "p95": 32245.74,
+              "p99": 32835.09
+            },
+            {
+              "kind": 1,
+              "p50": 449.58,
+              "p95": 858.19,
+              "p99": 888.86
+            },
+            {
+              "kind": 2,
+              "p50": 1999.99,
+              "p95": 4566.88,
+              "p99": 4854.41
+            },
+            {
+              "kind": 3,
+              "p50": 660.19,
+              "p95": 1059.47,
+              "p99": 1091.89
+            }
+          ],
+          "application": {
+            "operations": 1678,
+            "p95Ms": 37.4,
+            "p99Ms": 42.67
+          },
+          "eventLoopP99Ms": 21,
+          "expiredAttempts": 0,
+          "failedJobs": 0,
+          "remainingExpiredHistory": 0,
+          "plans": {
+            "claim": {
+              "executionMs": 0.461,
+              "nodes": [
+                {
+                  "type": "Result",
+                  "rows": 1,
+                  "buffers": 32
+                },
+                {
+                  "type": "Function Scan",
+                  "rows": 4,
+                  "buffers": 0
+                },
+                {
+                  "type": "Limit",
+                  "rows": 1,
+                  "buffers": 10
+                },
+                {
+                  "type": "Sort",
+                  "rows": 1,
+                  "buffers": 10
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 1,
+                  "buffers": 10
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 4,
+                  "buffers": 0
+                },
+                {
+                  "type": "Subquery Scan",
+                  "rows": 0,
+                  "buffers": 10
+                },
+                {
+                  "type": "Limit",
+                  "rows": 0,
+                  "buffers": 10
+                },
+                {
+                  "type": "LockRows",
+                  "rows": 0,
+                  "buffers": 10
+                },
+                {
+                  "type": "Index Scan",
+                  "index": "jobs_pending",
+                  "rows": 0,
+                  "buffers": 9
+                },
+                {
+                  "type": "ModifyTable",
+                  "rows": 1,
+                  "buffers": 32
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 1,
+                  "buffers": 14
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 1,
+                  "buffers": 10
+                },
+                {
+                  "type": "Index Scan",
+                  "index": "jobs_pkey",
+                  "rows": 1,
+                  "buffers": 4
+                },
+                {
+                  "type": "ModifyTable",
+                  "rows": 0,
+                  "buffers": 20
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 1,
+                  "buffers": 0
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 1,
+                  "buffers": 32
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 1,
+                  "buffers": 0
+                },
+                {
+                  "type": "Aggregate",
+                  "rows": 0,
+                  "buffers": 0
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 0,
+                  "buffers": 0
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 0,
+                  "buffers": 0
+                },
+                {
+                  "type": "Limit",
+                  "rows": 0,
+                  "buffers": 0
+                },
+                {
+                  "type": "Index Only Scan",
+                  "index": "jobs_pending",
+                  "rows": 0,
+                  "buffers": 0
+                }
+              ]
+            },
+            "cleanup": {
+              "executionMs": 1.594,
+              "nodes": [
+                {
+                  "type": "ModifyTable",
+                  "rows": 100,
+                  "buffers": 1250
+                },
+                {
+                  "type": "Limit",
+                  "rows": 100,
+                  "buffers": 544
+                },
+                {
+                  "type": "Sort",
+                  "rows": 100,
+                  "buffers": 544
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 400,
+                  "buffers": 544
+                },
+                {
+                  "type": "Function Scan",
+                  "rows": 4,
+                  "buffers": 0
+                },
+                {
+                  "type": "Subquery Scan",
+                  "rows": 100,
+                  "buffers": 544
+                },
+                {
+                  "type": "Limit",
+                  "rows": 100,
+                  "buffers": 544
+                },
+                {
+                  "type": "LockRows",
+                  "rows": 100,
+                  "buffers": 544
+                },
+                {
+                  "type": "Index Scan",
+                  "index": "jobs_retention",
+                  "rows": 100,
+                  "buffers": 44
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 100,
+                  "buffers": 944
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 100,
+                  "buffers": 544
+                },
+                {
+                  "type": "Index Scan",
+                  "index": "jobs_pkey",
+                  "rows": 1,
+                  "buffers": 400
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "label": "stress-3",
+      "recordedAt": "2026-11-02T16:20:34.912Z",
+      "node": "v24.4.1",
+      "postgres": "16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)",
+      "cpu": "AMD Ryzen Threadripper 3970X 32-Core Processor",
+      "availableCpus": 64,
+      "durationMs": 10000,
+      "intervalMs": 50,
+      "profiles": [
+        {
+          "profile": "balanced",
+          "queryPoolSize": 4,
+          "runners": 2,
+          "concurrencyPerRunner": 4,
+          "handlerDbMs": 0,
+          "applicationDbMs": 2,
+          "initialBacklog": 1500,
+          "retainedHistory": 20000,
+          "initialExpiredHistory": 3000,
+          "submitted": 3722,
+          "retries": 68,
+          "producingMs": 10011,
+          "totalMs": 10994,
+          "throughputPerSecond": 339,
+          "peakOutstanding": 1511,
+          "peakWaiting": 9,
+          "peakConnections": 4,
+          "enqueueMs": {
+            "p50": 10.35,
+            "p95": 17.44,
+            "p99": 19.63
+          },
+          "startDelayMs": [
+            {
+              "kind": 0,
+              "p50": 3239.02,
+              "p95": 5324.53,
+              "p99": 5501.5
+            },
+            {
+              "kind": 1,
+              "p50": 12.49,
+              "p95": 16.89,
+              "p99": 18.93
+            },
+            {
+              "kind": 2,
+              "p50": 17.84,
+              "p95": 39.8,
+              "p99": 43.21
+            },
+            {
+              "kind": 3,
+              "p50": 218.69,
+              "p95": 225.82,
+              "p99": 229.33
+            }
+          ],
+          "application": {
+            "operations": 882,
+            "p95Ms": 7.32,
+            "p99Ms": 10.41
+          },
+          "eventLoopP99Ms": 21.07,
+          "expiredAttempts": 0,
+          "failedJobs": 0,
+          "remainingExpiredHistory": 0,
+          "plans": {
+            "claim": {
+              "executionMs": 0.574,
+              "nodes": [
+                {
+                  "type": "Result",
+                  "rows": 1,
+                  "buffers": 39
+                },
+                {
+                  "type": "Function Scan",
+                  "rows": 4,
+                  "buffers": 0
+                },
+                {
+                  "type": "Limit",
+                  "rows": 1,
+                  "buffers": 13
+                },
+                {
+                  "type": "Sort",
+                  "rows": 1,
+                  "buffers": 13
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 1,
+                  "buffers": 10
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 4,
+                  "buffers": 0
+                },
+                {
+                  "type": "Subquery Scan",
+                  "rows": 0,
+                  "buffers": 10
+                },
+                {
+                  "type": "Limit",
+                  "rows": 0,
+                  "buffers": 10
+                },
+                {
+                  "type": "LockRows",
+                  "rows": 0,
+                  "buffers": 10
+                },
+                {
+                  "type": "Index Scan",
+                  "index": "jobs_pending",
+                  "rows": 0,
+                  "buffers": 9
+                },
+                {
+                  "type": "ModifyTable",
+                  "rows": 1,
+                  "buffers": 39
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 1,
+                  "buffers": 17
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 1,
+                  "buffers": 13
+                },
+                {
+                  "type": "Index Scan",
+                  "index": "jobs_pkey",
+                  "rows": 1,
+                  "buffers": 4
+                },
+                {
+                  "type": "ModifyTable",
+                  "rows": 0,
+                  "buffers": 38
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 1,
+                  "buffers": 0
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 1,
+                  "buffers": 39
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 1,
+                  "buffers": 0
+                },
+                {
+                  "type": "Aggregate",
+                  "rows": 0,
+                  "buffers": 0
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 0,
+                  "buffers": 0
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 0,
+                  "buffers": 0
+                },
+                {
+                  "type": "Limit",
+                  "rows": 0,
+                  "buffers": 0
+                },
+                {
+                  "type": "Index Only Scan",
+                  "index": "jobs_pending",
+                  "rows": 0,
+                  "buffers": 0
+                }
+              ]
+            },
+            "cleanup": {
+              "executionMs": 1.597,
+              "nodes": [
+                {
+                  "type": "ModifyTable",
+                  "rows": 100,
+                  "buffers": 1140
+                },
+                {
+                  "type": "Limit",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "Sort",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 400,
+                  "buffers": 440
+                },
+                {
+                  "type": "Function Scan",
+                  "rows": 4,
+                  "buffers": 0
+                },
+                {
+                  "type": "Subquery Scan",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "Limit",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "LockRows",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "Index Scan",
+                  "index": "jobs_terminal",
+                  "rows": 100,
+                  "buffers": 40
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 100,
+                  "buffers": 840
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "Index Scan",
+                  "index": "jobs_pkey",
+                  "rows": 1,
+                  "buffers": 400
+                }
+              ]
+            }
+          }
+        },
+        {
+          "profile": "contended",
+          "queryPoolSize": 2,
+          "runners": 2,
+          "concurrencyPerRunner": 4,
+          "handlerDbMs": 8,
+          "applicationDbMs": 12,
+          "initialBacklog": 1500,
+          "retainedHistory": 20000,
+          "initialExpiredHistory": 3000,
+          "submitted": 3722,
+          "retries": 68,
+          "producingMs": 10031,
+          "totalMs": 43068,
+          "throughputPerSecond": 86,
+          "peakOutstanding": 3030,
+          "peakWaiting": 14,
+          "peakConnections": 2,
+          "enqueueMs": {
+            "p50": 31.11,
+            "p95": 38.58,
+            "p99": 41.88
+          },
+          "startDelayMs": [
+            {
+              "kind": 0,
+              "p50": 25841.66,
+              "p95": 32244.93,
+              "p99": 32811.01
+            },
+            {
+              "kind": 1,
+              "p50": 472.9,
+              "p95": 805.21,
+              "p99": 837.45
+            },
+            {
+              "kind": 2,
+              "p50": 1937.16,
+              "p95": 4470.69,
+              "p99": 4751.4
+            },
+            {
+              "kind": 3,
+              "p50": 682.86,
+              "p95": 1001.92,
+              "p99": 1033.22
+            }
+          ],
+          "application": {
+            "operations": 1682,
+            "p95Ms": 36.95,
+            "p99Ms": 42.21
+          },
+          "eventLoopP99Ms": 21,
+          "expiredAttempts": 0,
+          "failedJobs": 0,
+          "remainingExpiredHistory": 0,
+          "plans": {
+            "claim": {
+              "executionMs": 0.393,
+              "nodes": [
+                {
+                  "type": "Result",
+                  "rows": 1,
+                  "buffers": 32
+                },
+                {
+                  "type": "Function Scan",
+                  "rows": 4,
+                  "buffers": 0
+                },
+                {
+                  "type": "Limit",
+                  "rows": 1,
+                  "buffers": 10
+                },
+                {
+                  "type": "Sort",
+                  "rows": 1,
+                  "buffers": 10
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 1,
+                  "buffers": 10
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 4,
+                  "buffers": 0
+                },
+                {
+                  "type": "Subquery Scan",
+                  "rows": 0,
+                  "buffers": 10
+                },
+                {
+                  "type": "Limit",
+                  "rows": 0,
+                  "buffers": 10
+                },
+                {
+                  "type": "LockRows",
+                  "rows": 0,
+                  "buffers": 10
+                },
+                {
+                  "type": "Index Scan",
+                  "index": "jobs_pending",
+                  "rows": 0,
+                  "buffers": 9
+                },
+                {
+                  "type": "ModifyTable",
+                  "rows": 1,
+                  "buffers": 32
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 1,
+                  "buffers": 14
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 1,
+                  "buffers": 10
+                },
+                {
+                  "type": "Index Scan",
+                  "index": "jobs_pkey",
+                  "rows": 1,
+                  "buffers": 4
+                },
+                {
+                  "type": "ModifyTable",
+                  "rows": 0,
+                  "buffers": 5
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 1,
+                  "buffers": 0
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 1,
+                  "buffers": 32
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 1,
+                  "buffers": 0
+                },
+                {
+                  "type": "Aggregate",
+                  "rows": 0,
+                  "buffers": 0
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 0,
+                  "buffers": 0
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 0,
+                  "buffers": 0
+                },
+                {
+                  "type": "Limit",
+                  "rows": 0,
+                  "buffers": 0
+                },
+                {
+                  "type": "Index Only Scan",
+                  "index": "jobs_pending",
+                  "rows": 0,
+                  "buffers": 0
+                }
+              ]
+            },
+            "cleanup": {
+              "executionMs": 1.333,
+              "nodes": [
+                {
+                  "type": "ModifyTable",
+                  "rows": 100,
+                  "buffers": 1140
+                },
+                {
+                  "type": "Limit",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "Sort",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 400,
+                  "buffers": 440
+                },
+                {
+                  "type": "Function Scan",
+                  "rows": 4,
+                  "buffers": 0
+                },
+                {
+                  "type": "Subquery Scan",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "Limit",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "LockRows",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "Index Scan",
+                  "index": "jobs_terminal",
+                  "rows": 100,
+                  "buffers": 40
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 100,
+                  "buffers": 840
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "Index Scan",
+                  "index": "jobs_pkey",
+                  "rows": 1,
+                  "buffers": 400
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "label": "lower-offer-rate",
+      "recordedAt": "2026-11-02T16:21:11.928Z",
+      "node": "v24.4.1",
+      "postgres": "16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)",
+      "cpu": "AMD Ryzen Threadripper 3970X 32-Core Processor",
+      "availableCpus": 64,
+      "durationMs": 10000,
+      "intervalMs": 150,
+      "profiles": [
+        {
+          "profile": "balanced",
+          "queryPoolSize": 4,
+          "runners": 2,
+          "concurrencyPerRunner": 4,
+          "handlerDbMs": 0,
+          "applicationDbMs": 2,
+          "initialBacklog": 1500,
+          "retainedHistory": 20000,
+          "initialExpiredHistory": 3000,
+          "submitted": 2237,
+          "retries": 23,
+          "producingMs": 10011,
+          "totalMs": 10124,
+          "throughputPerSecond": 221,
+          "peakOutstanding": 1511,
+          "peakWaiting": 7,
+          "peakConnections": 4,
+          "enqueueMs": {
+            "p50": 8.15,
+            "p95": 16.77,
+            "p99": 20.36
+          },
+          "startDelayMs": [
+            {
+              "kind": 0,
+              "p50": 1915.36,
+              "p95": 4046.82,
+              "p99": 4227.72
+            },
+            {
+              "kind": 1,
+              "p50": 11.14,
+              "p95": 15.86,
+              "p99": 22.55
+            },
+            {
+              "kind": 2,
+              "p50": 16.7,
+              "p95": 38.6,
+              "p99": 51.57
+            },
+            {
+              "kind": 3,
+              "p50": 207.27,
+              "p95": 211.65,
+              "p99": 214.94
+            }
+          ],
+          "application": {
+            "operations": 840,
+            "p95Ms": 7.15,
+            "p99Ms": 10.24
+          },
+          "eventLoopP99Ms": 21.17,
+          "expiredAttempts": 0,
+          "failedJobs": 0,
+          "remainingExpiredHistory": 0,
+          "plans": {
+            "claim": {
+              "executionMs": 0.655,
+              "nodes": [
+                {
+                  "type": "Result",
+                  "rows": 1,
+                  "buffers": 39
+                },
+                {
+                  "type": "Function Scan",
+                  "rows": 4,
+                  "buffers": 0
+                },
+                {
+                  "type": "Limit",
+                  "rows": 1,
+                  "buffers": 13
+                },
+                {
+                  "type": "Sort",
+                  "rows": 1,
+                  "buffers": 13
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 1,
+                  "buffers": 10
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 4,
+                  "buffers": 0
+                },
+                {
+                  "type": "Subquery Scan",
+                  "rows": 0,
+                  "buffers": 10
+                },
+                {
+                  "type": "Limit",
+                  "rows": 0,
+                  "buffers": 10
+                },
+                {
+                  "type": "LockRows",
+                  "rows": 0,
+                  "buffers": 10
+                },
+                {
+                  "type": "Index Scan",
+                  "index": "jobs_pending",
+                  "rows": 0,
+                  "buffers": 9
+                },
+                {
+                  "type": "ModifyTable",
+                  "rows": 1,
+                  "buffers": 39
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 1,
+                  "buffers": 17
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 1,
+                  "buffers": 13
+                },
+                {
+                  "type": "Index Scan",
+                  "index": "jobs_pkey",
+                  "rows": 1,
+                  "buffers": 4
+                },
+                {
+                  "type": "ModifyTable",
+                  "rows": 0,
+                  "buffers": 41
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 1,
+                  "buffers": 0
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 1,
+                  "buffers": 39
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 1,
+                  "buffers": 0
+                },
+                {
+                  "type": "Aggregate",
+                  "rows": 0,
+                  "buffers": 0
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 0,
+                  "buffers": 0
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 0,
+                  "buffers": 0
+                },
+                {
+                  "type": "Limit",
+                  "rows": 0,
+                  "buffers": 0
+                },
+                {
+                  "type": "Index Only Scan",
+                  "index": "jobs_pending",
+                  "rows": 0,
+                  "buffers": 0
+                }
+              ]
+            },
+            "cleanup": {
+              "executionMs": 1.558,
+              "nodes": [
+                {
+                  "type": "ModifyTable",
+                  "rows": 100,
+                  "buffers": 1140
+                },
+                {
+                  "type": "Limit",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "Sort",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 400,
+                  "buffers": 440
+                },
+                {
+                  "type": "Function Scan",
+                  "rows": 4,
+                  "buffers": 0
+                },
+                {
+                  "type": "Subquery Scan",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "Limit",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "LockRows",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "Index Scan",
+                  "index": "jobs_terminal",
+                  "rows": 100,
+                  "buffers": 40
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 100,
+                  "buffers": 840
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "Index Scan",
+                  "index": "jobs_pkey",
+                  "rows": 1,
+                  "buffers": 400
+                }
+              ]
+            }
+          }
+        },
+        {
+          "profile": "contended",
+          "queryPoolSize": 2,
+          "runners": 2,
+          "concurrencyPerRunner": 4,
+          "handlerDbMs": 8,
+          "applicationDbMs": 12,
+          "initialBacklog": 1500,
+          "retainedHistory": 20000,
+          "initialExpiredHistory": 3000,
+          "submitted": 2237,
+          "retries": 23,
+          "producingMs": 10010,
+          "totalMs": 25200,
+          "throughputPerSecond": 89,
+          "peakOutstanding": 1511,
+          "peakWaiting": 13,
+          "peakConnections": 2,
+          "enqueueMs": {
+            "p50": 27.32,
+            "p95": 34.07,
+            "p99": 36.51
+          },
+          "startDelayMs": [
+            {
+              "kind": 0,
+              "p50": 14231.33,
+              "p95": 18984.37,
+              "p99": 19361.16
+            },
+            {
+              "kind": 1,
+              "p50": 35.94,
+              "p95": 42.56,
+              "p99": 44.03
+            },
+            {
+              "kind": 2,
+              "p50": 48.97,
+              "p95": 123.39,
+              "p99": 130.05
+            },
+            {
+              "kind": 3,
+              "p50": 236.47,
+              "p95": 246.28,
+              "p99": 248.62
+            }
+          ],
+          "application": {
+            "operations": 986,
+            "p95Ms": 37.5,
+            "p99Ms": 41.22
+          },
+          "eventLoopP99Ms": 20.99,
+          "expiredAttempts": 0,
+          "failedJobs": 0,
+          "remainingExpiredHistory": 0,
+          "plans": {
+            "claim": {
+              "executionMs": 0.389,
+              "nodes": [
+                {
+                  "type": "Result",
+                  "rows": 1,
+                  "buffers": 29
+                },
+                {
+                  "type": "Function Scan",
+                  "rows": 4,
+                  "buffers": 0
+                },
+                {
+                  "type": "Limit",
+                  "rows": 1,
+                  "buffers": 10
+                },
+                {
+                  "type": "Sort",
+                  "rows": 1,
+                  "buffers": 10
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 1,
+                  "buffers": 10
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 4,
+                  "buffers": 0
+                },
+                {
+                  "type": "Subquery Scan",
+                  "rows": 0,
+                  "buffers": 10
+                },
+                {
+                  "type": "Limit",
+                  "rows": 0,
+                  "buffers": 10
+                },
+                {
+                  "type": "LockRows",
+                  "rows": 0,
+                  "buffers": 10
+                },
+                {
+                  "type": "Index Scan",
+                  "index": "jobs_pending",
+                  "rows": 0,
+                  "buffers": 9
+                },
+                {
+                  "type": "ModifyTable",
+                  "rows": 1,
+                  "buffers": 29
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 1,
+                  "buffers": 14
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 1,
+                  "buffers": 10
+                },
+                {
+                  "type": "Index Scan",
+                  "index": "jobs_pkey",
+                  "rows": 1,
+                  "buffers": 4
+                },
+                {
+                  "type": "ModifyTable",
+                  "rows": 0,
+                  "buffers": 5
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 1,
+                  "buffers": 0
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 1,
+                  "buffers": 29
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 1,
+                  "buffers": 0
+                },
+                {
+                  "type": "Aggregate",
+                  "rows": 0,
+                  "buffers": 0
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 0,
+                  "buffers": 0
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 0,
+                  "buffers": 0
+                },
+                {
+                  "type": "Limit",
+                  "rows": 0,
+                  "buffers": 0
+                },
+                {
+                  "type": "Index Only Scan",
+                  "index": "jobs_pending",
+                  "rows": 0,
+                  "buffers": 0
+                }
+              ]
+            },
+            "cleanup": {
+              "executionMs": 1.266,
+              "nodes": [
+                {
+                  "type": "ModifyTable",
+                  "rows": 100,
+                  "buffers": 1140
+                },
+                {
+                  "type": "Limit",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "Sort",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 400,
+                  "buffers": 440
+                },
+                {
+                  "type": "Function Scan",
+                  "rows": 4,
+                  "buffers": 0
+                },
+                {
+                  "type": "Subquery Scan",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "Limit",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "LockRows",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "Index Scan",
+                  "index": "jobs_terminal",
+                  "rows": 100,
+                  "buffers": 40
+                },
+                {
+                  "type": "Nested Loop",
+                  "rows": 100,
+                  "buffers": 840
+                },
+                {
+                  "type": "CTE Scan",
+                  "rows": 100,
+                  "buffers": 440
+                },
+                {
+                  "type": "Index Scan",
+                  "index": "jobs_pkey",
+                  "rows": 1,
+                  "buffers": 400
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "storageVersion": 3,
+  "sourceReportSha256": "74bf8ea313ca067c2bb872be30f9779fb56c63303e84f6df648bd6bcebec76aa",
+  "summaries": [
+    {
+      "profile": "balanced",
+      "repetitions": 3,
+      "jobsPerSecond": {
+        "min": 242,
+        "median": 339,
+        "max": 346
+      },
+      "quietStartP95Ms": {
+        "min": 16.8,
+        "median": 16.89,
+        "max": 32.66
+      },
+      "applicationP95Ms": {
+        "min": 7.32,
+        "median": 7.52,
+        "max": 12.56
+      }
+    },
+    {
+      "profile": "contended",
+      "repetitions": 3,
+      "jobsPerSecond": {
+        "min": 85,
+        "median": 86,
+        "max": 86
+      },
+      "quietStartP95Ms": {
+        "min": 805.21,
+        "median": 858.19,
+        "max": 1089.7
+      },
+      "applicationP95Ms": {
+        "min": 36.95,
+        "median": 37.4,
+        "max": 38.59
+      }
+    }
+  ]
+}

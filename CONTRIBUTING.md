@@ -37,20 +37,38 @@ npm pack --dry-run
 ## Load profiles
 
 ```sh
-npm run test:load
-PGCLEAR_JOBS_LOAD_DURATION_MS=60000 PGCLEAR_JOBS_LOAD_INTERVAL_MS=150 npm run test:load
+npm run test:compile
+for sample in 1 2 3; do
+  PGCLEAR_JOBS_LOAD_OUTPUT="/tmp/jobs-load-$sample.json" node --env-file-if-exists=.env .test-dist/test/load/queue-load.js
+done
+PGCLEAR_JOBS_LOAD_INTERVAL_MS=150 npm run test:load
 ```
 
-The default producer phase is ten seconds with 50 ms between batches. Each batch offers eleven
-jobs, followed by backlog drain. Two profiles share four or two connections between runners and
-simulated application work. Fixtures include ready backlog, retries, delayed work, and retained/
-expired history. Set `PGCLEAR_JOBS_LOAD_OUTPUT` to save JSON. Setup/drain/cleanup add time beyond the
-producer phase; only generated load definitions are cleaned up afterward.
+The default producer phase is ten seconds, targeting batches of eleven jobs every 50 ms, followed
+by backlog drain. Enqueue waits can slow production. Two runners in one Node process each allow four handlers and share a pool with two simulated
+application loops. Each profile starts with 1,500 bulk jobs, 20,000 retained and 3,000 expired records;
+only generated definitions are cleaned up. Storage must already match the current package.
 
-These are synthetic single-host measurements, not capacity guarantees. The historical fairness
-comparison is retained in `test/load/claim-fairness-baseline.json`; it describes an earlier revision,
-not current performance. Run the profiles for current measurements and validate real dependencies
-in the consuming application.
+[November 2 results](test/load/current-2026-11-02.json): Jobs 0.3.1 with its locked pgclear 0.3.3,
+Node 24.4.1 and PostgreSQL 16.15 on a local Threadripper/WSL2 host. Medians of three stress runs:
+
+| Profile                  | Completed jobs/s, median (range) | Quiet-job start p95, ms | Application transaction p95, ms |
+| ------------------------ | -------------------------------: | ----------------------: | ------------------------------: |
+| Light SQL, 4 connections |                    339 (242–346) |                   16.89 |                            7.52 |
+| Slow SQL, 2 connections  |                       86 (85–86) |                  858.19 |                           37.40 |
+
+Light/slow profiles use handler SQL waits of 0/8 ms and application SQL waits of 2/12 ms; their
+comparison changes work as well as pool size. Quiet-job p95 ranged from 16.80–32.66 ms in light SQL
+and 805.21–1,089.70 ms in slow SQL. A single lower-offer-rate diagnostic (150 ms between batches)
+had a slow-profile quiet-job p95 of 42.56 ms. All runs completed expected work/retries
+without failed jobs or expired attempts. This demonstrates load sensitivity, not a capacity limit.
+
+Throughput includes initial backlog and drain time. Start delay includes enqueue and, for delayed
+jobs, intentional timing; retrying jobs contribute multiple starts. Reported p95s are medians of
+per-run p95s, not pooled distributions. Setup, cleanup and EXPLAIN observations are outside timed
+work; the JSON retains settings, versions, source/driver hashes, per-run metrics and plans.
+These synthetic local runs are not CI timing gates or production guarantees. The earlier
+[fairness comparison](test/load/claim-fairness-baseline.json) remains historical evidence.
 
 ## Releases
 
