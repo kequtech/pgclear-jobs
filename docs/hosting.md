@@ -4,16 +4,21 @@
 
 ## Startup and shutdown
 
+The basic worker needs only `await runJobs(pool, definitions)`. For graceful shutdown, pass the
+application host's existing shutdown signal. The engine stops claiming work, drains active handlers
+and aborts their scopes if the grace period expires. Handlers receive their own signal automatically.
+One host signal can serve multiple runners; no controller is needed per runner or handler.
+
+When the host also needs readiness:
+
 ```ts
 import { startJobs } from '@kequtech/pgclear-jobs';
 
-const stop = new AbortController();
-const worker = startJobs(pool, definitions, { signal: stop.signal });
+// shutdownSignal comes from the application's host lifecycle.
+const worker = startJobs(pool, definitions, { signal: shutdownSignal });
 void worker.done.catch(stopApplication); // Application failure policy; attach immediately.
 await worker.ready;
-// Framework startup may return here while done remains supervised.
-// On shutdown: stop accepting requests, then:
-stop.abort();
+// Start accepting requests; the host aborts shutdownSignal during shutdown.
 await worker.done;
 await pool.close();
 ```
@@ -28,9 +33,10 @@ Both promises are observed internally, but the application must still supervise 
 A pending onReady callback is interrupted by shutdown; its later rejection is observed. Its own
 side effects should honor application cancellation. Do not wait for a job to finish inside onReady.
 
-The application owns signal handlers and restart policy. Abort stops new claims/maintenance and
-lets admitted work finish until shutdownTimeoutMs expires, then aborts handler scopes. Await done
-before closing the pool; closing a pool is not worker supervision. Separate runs have independent
+The application owns process signals and restart policy. In a standalone Node process, a single
+AbortController can translate SIGINT/SIGTERM into the host shutdown signal; the
+[worker example](../examples/worker.ts) shows this optional wiring. Framework hosts can supply their
+existing lifecycle signal instead. Await done before closing the pool. Separate runs have independent
 lifetimes. Pass handler signals to dependencies and preserve cleanup failures alongside original errors.
 
 ## Framework-owned exit

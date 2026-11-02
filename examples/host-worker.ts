@@ -15,7 +15,7 @@ const spec = defineJob<{ value: number }>({ name: 'example:query' });
 const worker = defineWorker(spec, {
   transactional: true,
   async handler({ value }, { tx }) {
-    await tx.queryClassic('SELECT $1::integer', [value]);
+    await tx.queryClassic('SELECT $1 AS value', [value]);
   },
 });
 const running = startJobs(pool, [worker], { signal: stop.signal });

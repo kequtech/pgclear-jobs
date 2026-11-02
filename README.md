@@ -22,12 +22,9 @@ const worker = defineWorker(greeting, {
     console.log(`Hello, ${name}`);
   },
 });
-const stop = new AbortController();
-process.once('SIGINT', () => stop.abort());
-process.once('SIGTERM', () => stop.abort());
 try {
   await jobs(pool).send(greeting, { name: 'Ada' });
-  await runJobs(pool, [worker], { signal: stop.signal });
+  await runJobs(pool, [worker]);
 } finally {
   await pool.close();
 }
@@ -35,7 +32,8 @@ try {
 
 Producer contracts can be imported without handlers. Construction/imports create no storage or
 workers. Runtime configuration is application-owned; the migration CLI also reads .env. Runners
-use the supplied pool and leave it open. Supervise their lifetime and await shutdown before closing it.
+use the supplied pool and leave it open. `runJobs` runs continuously; shutdown integration belongs
+at the application host, as shown in [Hosting](docs/hosting.md#startup-and-shutdown).
 
 | Task                                                                  | Documentation                      |
 | --------------------------------------------------------------------- | ---------------------------------- |
@@ -45,7 +43,7 @@ use the supplied pool and leave it open. Supervise their lifetime and await shut
 | Host a worker, observe readiness or run it beside Next.js             | [Hosting](docs/hosting.md)         |
 | Bind another pgclear-based query API                                  | [Integration](docs/integration.md) |
 
-Jobs 0.2.1 uses storage version 2. Existing version-1 installations need explicit upgrade SQL in a
+Jobs 0.2.1 and later use storage version 2. Existing version-1 installations need explicit upgrade SQL in a
 new application migration, with old producers/workers stopped. Never reset queued work to upgrade.
 The guides, SQL resources and examples ship with the package; read the installed version's docs.
 

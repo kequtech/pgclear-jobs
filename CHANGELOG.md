@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.2
+
+- Simplify the README worker to a plain runJobs call. Keep optional process-signal wiring in hosting
+  examples and clarify that one host signal can stop multiple runners while Jobs handles draining.
+- Remove unnecessary SQL casts from worker examples. No runtime or storage changes.
+
 ## 0.2.1
 
 - Rewrite standalone documentation around reference, storage, reliability, hosting and integration.

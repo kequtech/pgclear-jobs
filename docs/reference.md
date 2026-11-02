@@ -12,7 +12,7 @@ const spec = defineJob<{ id: string }>({ name: 'refresh', maxAttempts: 3 });
 const worker = defineWorker(spec, {
   transactional: true,
   async handler(payload, { tx }) {
-    await tx.queryClassic('SELECT $1::text', [payload.id]);
+    await tx.queryClassic('SELECT $1 AS id', [payload.id]);
   },
 });
 ```
