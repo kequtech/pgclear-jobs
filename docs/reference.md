@@ -53,6 +53,14 @@ facade opens no hidden transaction. All operations below use that scope. The ada
 | sendMany(spec,submissions)                  | Up to 1000 {payload,id?,runAt?,delayMs?}; insert once, skip duplicate IDs, return inserted jobs without order guarantee |
 | request(spec,payload,{key,runAt?,delayMs?}) | Replace an unstarted head or create/update one coalesced successor behind a started head and its retries                |
 
+For another request under the same definition/key:
+
+| Existing work                       | Result                                                      |
+| ----------------------------------- | ----------------------------------------------------------- |
+| Head has never started              | Replace payload; preserve timing unless explicitly supplied |
+| Head has started, including retries | Retain head and create/update one blocked successor         |
+| Head becomes terminal               | Release its successor atomically                            |
+
 Timing accepts runAt:Date or delayMs, never both. Relative delay uses the PostgreSQL clock; new work
 with omitted timing is immediately eligible. Existing request timing is preserved unless explicitly
 replaced. Keys are scoped to the definition and accept up to 500 characters, including empty.

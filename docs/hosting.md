@@ -90,3 +90,19 @@ original error before retry bookkeeping, leaving lease recovery rather than a du
 Managed opening/commit/cleanup failures bypass this hook and reject the runner. Independent
 application-transaction errors remain handler failures unless the application escalates them.
 The [reference](reference.md#observation-and-error-policy) specifies hook fields and interruption rules.
+
+## Troubleshoot progress
+
+Correlate get/getMany, stats and attempts with onEvent by job ID:
+
+| Symptom                      | Evidence / action                                                                                           |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| Pending work does not start  | Check runAt, blockedBy, stats ready/delayed/blocked and matching worker capacity                            |
+| Running cancellation is slow | Check cancelRequestedAt; detection takes up to leaseMs / 3 plus database waits; pass signal to dependencies |
+| Ownership is lost            | attemptAbandoned reason leaseLost; inspect database/pool waits and maintenance capacity                     |
+| Execution deadline expires   | attemptAbandoned reason deadlineExceeded; inspect the job's saved executionTimeoutMs                        |
+| Shutdown grace expires       | attemptAbandoned reason runnerStopped; allow host time for worker grace and cleanup                         |
+| A ready worker stops later   | Observe done/run rejection and runnerFailed; readiness confirms startup only                                |
+
+Events are local and nondurable; recovery may change stored state without a local event. Terminal
+queue state does not prove stale JavaScript or external effects stopped. See [reliability](reliability.md).

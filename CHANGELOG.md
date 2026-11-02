@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.1
+
+- Clarify repeated request behavior and worker troubleshooting with compact tables using existing
+  queue state, lifecycle promises and diagnostic events.
+
 ## 0.3.0
 
 - Process shared schedule request keys in a consistent lock order across parallel maintenance batches.
