@@ -70,7 +70,7 @@ Application operations must remain safe under repetition.
 
 ```ts
 const job = await jobs(pool).cancel(jobId);
-// Pending work is cancelled. Running work has cancelRequestedAt set and is stopping.
+// Pending work is cancelled. Running work has cancelRequestedAt set.
 ```
 
 The same call works from any process using the database. Pending work becomes cancelled immediately.
@@ -89,11 +89,14 @@ async handler(payload, { signal }) {
 cancel returns after recording intent, not after the handler stops. Inspect state with get/getMany/find
 when needed. Repeated cancellation is safe. A completed/failed job rejects with JobStateError; a
 missing ID rejects with JobNotFoundError. Cancellation inside jobs(tx) becomes visible on commit.
+To cancel the current job from its handler, use the root jobs(pool) facade: a request made through
+that handler's managed transaction rolls back when it prevents the job's completion.
 
 Managed handler writes roll back when cancellation wins completion. Cancellation does not retry:
 the worker acknowledges it after callback cleanup, or lease recovery marks it cancelled if the worker
 is lost. Attempt history records cancelled. A completion committed before cancellation wins remains
-completed. Terminal transition promotes a keyed successor; cancellation targets only this job, so
+completed. Cancellation preserves lastError from an earlier failed attempt; the cancelled attempt's
+error is null. Terminal transition promotes a keyed successor; cancellation targets only this job, so
 cancel the successor separately if needed. Schedules continue producing until unscheduled.
 
 An uncooperative handler retains its local concurrency slot until it settles or runner shutdown

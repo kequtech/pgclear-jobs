@@ -2,6 +2,8 @@
 
 ## 0.3.0
 
+- Preserve earlier failure diagnostics consistently when cancellation is finalized by worker cleanup
+  or lease recovery. Avoid waiting twice for cancelled handler cleanup.
 - Extend cancel(id) to persist running-job cancellation across processes. Workers use the existing
   handler signal and heartbeat; completion, rollback, retry suppression and recovery remain fenced.
   Expose cancelRequestedAt and cancelled attempt history/events. Pending cancellation stays immediate.

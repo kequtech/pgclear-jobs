@@ -228,12 +228,12 @@ export async function executeAttempt<Database, Tx>(
   }
   // A commit can settle after cancellation won the race. Observe it only once acknowledged.
   if (completion.committed) outcomeEvent = { ...info, type: 'attemptCompleted' };
-  if (
+  const finishingCancellation =
     !outcomeEvent &&
     !failures.length &&
     !abandon.aborted &&
-    (abandoned === 'cancelRequested' || completionRefused)
-  ) {
+    (abandoned === 'cancelRequested' || completionRefused);
+  if (finishingCancellation) {
     await settleOrAbort(userHandler, abandon);
     if (!abandon.aborted && (await finishCancellation(execute, claim)))
       outcomeEvent = { ...info, type: 'attemptCancelled' };
@@ -242,5 +242,5 @@ export async function executeAttempt<Database, Tx>(
   if (failures.length === 1) throw failures[0];
   if (failures.length > 1) throw new AggregateError(failures, 'Job attempt and cleanup failed.');
   if (!outcomeEvent && abandoned) emit({ ...info, type: 'attemptAbandoned', reason: abandoned });
-  await settleOrAbort(userHandler, abandon);
+  if (!finishingCancellation) await settleOrAbort(userHandler, abandon);
 }

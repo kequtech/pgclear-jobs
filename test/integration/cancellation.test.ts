@@ -4,8 +4,15 @@ import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
 import { jobs, runJobs, defineJob, JobStateError } from '../../src/index.js';
-import { claimJob, finishClaim, finishCancellation, recoverClaims } from '../../src/claims.js';
+import {
+  claimJob,
+  finishClaim,
+  finishCancellation,
+  recoverClaims,
+  renewClaim,
+} from '../../src/claims.js';
 import { definition, execute, pool, until, url } from '../helpers/database.js';
+import type { Execute } from '../../src/storage.js';
 
 test('a different process observes durable cancellation through the existing handler signal', async () => {
   const spec = definition();
@@ -183,9 +190,77 @@ test('cancellation through a rolled-back producer transaction leaves the job run
     pool.transaction(async (tx) => {
       await jobs(tx).cancel(job.id);
       assert.equal((await jobs(pool).get(job.id))?.cancelRequestedAt, null);
+      assert.equal(
+        await finishClaim((text, values) => tx.queryClassic(text, values), claim, null),
+        false,
+      );
       throw new Error('rollback');
     }),
     /rollback/,
   );
   assert.equal(await finishClaim(execute, claim, null), true);
 });
+
+for (const finalizer of ['worker', 'recovery'] as const) {
+  test(`${finalizer} cancellation preserves the previous attempt's failure diagnostic`, async () => {
+    const def = definition({ maxAttempts: 3 });
+    const job = await jobs(pool).send(def, 1);
+    const first = (await claimJob(execute, [def.name], 30000)).claim!;
+    await finishClaim(execute, first, 'Earlier provider failure');
+    const second = (await claimJob(execute, [def.name], 30000)).claim!;
+    await jobs(pool).cancel(job.id);
+    if (finalizer === 'worker') assert.equal(await finishCancellation(execute, second), true);
+    else {
+      await pool.queryClassic(
+        "UPDATE pgclear_jobs.jobs SET lease_until=clock_timestamp()-interval '1 second' WHERE id=$1",
+        [job.id],
+      );
+      await recoverClaims(execute);
+    }
+    const record = await jobs(pool).get(job.id);
+    assert.equal(record?.state, 'cancelled');
+    assert.equal(record?.lastError, 'Earlier provider failure');
+    const attempts = await jobs(pool).attempts(job.id);
+    assert.deepEqual(
+      attempts.map((a) => [a.outcome, a.error]),
+      [
+        ['cancelled', null],
+        ['failed', 'Earlier provider failure'],
+      ],
+    );
+  });
+}
+
+for (const operation of ['renew', 'complete'] as const) {
+  test(`${operation} observes cancellation committed while waiting for the job row`, async () => {
+    const def = definition();
+    const job = await jobs(pool).send(def, 1);
+    const claim = (await claimJob(execute, [def.name], 30000)).claim!;
+    const session = await pool.acquire();
+    let pending: Promise<boolean | 'cancelled'> | undefined;
+    try {
+      await pool.transaction(async (tx) => {
+        await tx.queryClassic('SELECT id FROM pgclear_jobs.jobs WHERE id=$1 FOR UPDATE', [job.id]);
+        const contender: Execute = (text, values) => session.queryClassic(text, values);
+        pending =
+          operation === 'renew'
+            ? renewClaim(contender, claim, 30000)
+            : finishClaim(contender, claim, null);
+        await until(async () => {
+          const { rows } = await pool.queryClassic<{ blocked: boolean }>(
+            'SELECT cardinality(pg_blocking_pids($1)) > 0 AS blocked',
+            [session.info.backendPid],
+          );
+          return rows[0]?.blocked === true;
+        });
+        await jobs(tx).cancel(job.id);
+      });
+      assert.equal(await pending, operation === 'renew' ? 'cancelled' : false);
+      assert.equal((await jobs(pool).get(job.id))?.state, 'running');
+      assert.equal(await finishCancellation(execute, claim), true);
+    } finally {
+      await pending;
+      await session.release();
+    }
+  });
+}

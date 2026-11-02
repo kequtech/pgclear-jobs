@@ -150,7 +150,7 @@ export async function recoverClaims(execute: Execute, limit = 100): Promise<numb
       UPDATE pgclear_jobs.jobs j SET ${outcomeUpdate(
         'false',
         remainingAttempts,
-        "CASE WHEN j.cancel_requested_at IS NOT NULL THEN NULL ELSE 'Attempt lease expired' END",
+        "CASE WHEN j.cancel_requested_at IS NOT NULL THEN j.last_error ELSE 'Attempt lease expired' END",
         retryTime,
         'j.cancel_requested_at IS NOT NULL',
       )}
