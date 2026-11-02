@@ -2,6 +2,7 @@
 
 ## 0.3.0
 
+- Process shared schedule request keys in a consistent lock order across parallel maintenance batches.
 - Preserve earlier failure diagnostics consistently when cancellation is finalized by worker cleanup
   or lease recovery. Avoid waiting twice for cancelled handler cleanup.
 - Extend cancel(id) to persist running-job cancellation across processes. Workers use the existing

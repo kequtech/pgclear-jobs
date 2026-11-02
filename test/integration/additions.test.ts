@@ -5,6 +5,7 @@ import { jobs, startJobs, JobStateError } from '../../src/index.js';
 import { advanceSchedules } from '../../src/schedules.js';
 import { claimJob, finishClaim } from '../../src/claims.js';
 import { definition, execute, pool, until } from '../helpers/database.js';
+import type { InputValue, QueryOptions, Transaction, TransactionOptions } from '@kequtech/pgclear';
 
 test('bulk lookup preserves requested order, missing IDs, duplicates and transaction visibility', async (t) => {
   const a = await jobs(pool).send(definition(), 1);
@@ -163,4 +164,75 @@ test('schedule edits preserve due time and advancing requests rolls back with th
   assert.equal((await jobs(pool).find(def)).length, 1);
   const ordinary = await jobs(pool).schedule(def, 4, { cron: '* * * * *' });
   assert.equal(ordinary.requestKey, null);
+});
+
+test('parallel schedule batches acquire shared request keys in the same order', async () => {
+  const def = definition();
+  const queue = jobs(pool);
+  const heads = new Map([
+    ['a', (await queue.request(def, 0, { key: 'a' })).id],
+    ['b', (await queue.request(def, 0, { key: 'b' })).id],
+  ]);
+  for (let index = 0; index < 100; index++) {
+    await queue.schedule(def, index, {
+      cron: '* * * * *',
+      key: `slot:${index}`,
+      requestKey: index < 25 || index >= 75 ? 'a' : 'b',
+    });
+  }
+  await pool.queryClassic(
+    `UPDATE pgclear_jobs.schedules SET next_run_at =
+    '2000-01-01'::timestamptz + split_part(key, ':', 2)::integer * interval '1 millisecond'
+    WHERE name=$1`,
+    [def.name],
+  );
+  const selected = Promise.withResolvers<void>();
+  let batches = 0;
+  const concurrent = new Proxy(pool, {
+    get(target, key) {
+      if (key === 'transaction')
+        return <T>(work: (tx: Transaction) => Promise<T>, options?: TransactionOptions) =>
+          target.transaction(
+            (tx) =>
+              work(
+                new Proxy(tx, {
+                  get(scope, member) {
+                    if (member === 'queryClassic')
+                      return async <Row extends object>(
+                        text: string,
+                        values?: readonly InputValue[],
+                        settings?: QueryOptions,
+                      ) => {
+                        const result = await scope.queryClassic<Row>(text, values, settings);
+                        const first = result.rows[0] as
+                          { record?: { request_key?: unknown } } | undefined;
+                        if (first?.record && 'request_key' in first.record) {
+                          if (++batches === 2) selected.resolve();
+                          await selected.promise;
+                        }
+                        return result;
+                      };
+                    const value: unknown = Reflect.get(scope, member, scope);
+                    return typeof value === 'function' ? value.bind(scope) : value;
+                  },
+                }),
+              ),
+            options,
+          );
+      const value: unknown = Reflect.get(target, key, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  const results = await Promise.allSettled([
+    advanceSchedules(concurrent, [def.name], 10000),
+    advanceSchedules(concurrent, [def.name], 10000),
+  ]);
+  for (const result of results) if (result.status === 'rejected') throw result.reason;
+  assert.equal(batches, 2);
+  assert.equal((await queue.find(def)).length, 2);
+  const schedules = await queue.schedules(def, { limit: 1000 });
+  assert.equal(schedules.length, 100);
+  assert.ok(
+    schedules.every((s) => s.nextRunAt > new Date() && s.lastJobId === heads.get(s.requestKey!)),
+  );
 });

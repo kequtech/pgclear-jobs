@@ -153,7 +153,15 @@ export async function advanceSchedules(
        ORDER BY next_run_at, id LIMIT 50 FOR UPDATE SKIP LOCKED`,
         [JSON.stringify(names)],
       );
-      for (const { record: schedule, now } of rows) {
+      // Different batches can request the same heads. Keep their job lock order consistent,
+      // while preserving due-time order among schedules that share one request key.
+      const ordered = [...rows].sort((a, b) => {
+        if (a.record.name !== b.record.name) return a.record.name < b.record.name ? -1 : 1;
+        const left = a.record.request_key ?? '';
+        const right = b.record.request_key ?? '';
+        return left === right ? 0 : left < right ? -1 : 1;
+      });
+      for (const { record: schedule, now } of ordered) {
         const clock = new Date(now);
         const options = { cron: schedule.cron, timeZone: schedule.time_zone };
         const occurred = new Date(schedule.next_run_at);
